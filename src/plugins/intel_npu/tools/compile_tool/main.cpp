@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <intel_npu/ops/flash_attention_tile.hpp>
 #include <iostream>
 #include <map>
 #include <openvino/core/partial_shape.hpp>
@@ -454,7 +455,7 @@ int main(int argc, char* argv[]) {
 
         ov::Core core;
         std::cout << "Checking FLAGS_LOG_LEVEL " << FLAGS_log_level << std::endl;
-
+        core.add_extension(std::make_shared<ov::OpExtension<ov::intel_npu::op::FlashAttentionTile>>());
         if (!FLAGS_log_level.empty()) {
             std::cout << "Setting log level " << FLAGS_log_level << std::endl;
             ov::log::Level level;
