@@ -219,6 +219,10 @@ ov::npuw::JustInferRequest::JustInferRequest(const std::shared_ptr<ov::npuw::Com
     : IBaseInferRequest(compiled_model),
       m_func_mem_mgr(compiled_model) {
     using namespace std::placeholders;
+
+    m_llm_profile.report_on_die = ov::npuw::profiling_enabled();
+    m_llm_profile.area = "LLM/execution";
+
     m_func_mem_mgr.set_alloc(std::bind(&JustInferRequest::allocMem, this, _1, _2, _3));
     m_func_mem_mgr.assign_memory();
 
@@ -1626,120 +1630,24 @@ void ov::npuw::JustInferRequest::run_hfa_tiled_inference(std::size_t real_idx, s
 
     size_t next_available_mask_buffer_idx = 0;  // Track next available pre-allocated mask buffer for cache misses
 
-    // Helper lambda: Process a single tile
-    auto process_tile = [&](auto& request,
-                            auto& model,
-                            const ov::SoPtr<ov::ITensor>& k_source,
-                            const ov::SoPtr<ov::ITensor>& v_source,
-                            int64_t kv_offset,
-                            int64_t mask_offset,
-                            int64_t tile_length,
-                            bool async = false) {
-        // Get tile input buffers
-        auto k_tile_buffer = request->get_tensor(model->inputs()[tile_in.k]);
-        auto v_tile_buffer = request->get_tensor(model->inputs()[tile_in.v]);
-        auto mask_tile_buffer = request->get_tensor(model->inputs()[tile_in.mask]);
-
-        // Extract K tile
-        if (hfa_can_reuse_tensor_zero_copy(k_source, k_tile_buffer, K_SEQ_DIM, kv_offset, tile_length)) {
-            request->set_tensor(model->inputs()[tile_in.k], k_source);
-        } else {
-            hfa_extract_and_copy_tile(k_source, k_tile_buffer, K_SEQ_DIM, kv_offset, tile_length, "K");
-        }
-
-        // Extract V tile
-        if (hfa_can_reuse_tensor_zero_copy(v_source, v_tile_buffer, V_SEQ_DIM, kv_offset, tile_length)) {
-            request->set_tensor(model->inputs()[tile_in.v], v_source);
-        } else {
-            hfa_extract_and_copy_tile(v_source, v_tile_buffer, V_SEQ_DIM, kv_offset, tile_length, "V");
-        }
-
-        // Extract mask tile with caching (if enabled) to avoid redundant extraction
-        if (attention_mask_tensor) {
-            // Check if zero-copy is possible (rare case where full mask matches tile)
-            if (hfa_can_reuse_tensor_zero_copy(attention_mask_tensor,
-                                               mask_tile_buffer,
-                                               MASK_KV_SEQ_DIM,
-                                               mask_offset,
-                                               tile_length)) {
-                request->set_tensor(model->inputs()[tile_in.mask], attention_mask_tensor);
-            } else if (m_hfa_runtime_ctx.has_value()) {
-                // Cache is enabled - try to find cached tile
-                auto cached_tile =
-                    m_hfa_runtime_ctx->find_cached_mask_tile(attention_mask_tensor, mask_offset, tile_length);
-                if (cached_tile) {
-                    // Cache hit - reuse previously extracted tile
-                    request->set_tensor(model->inputs()[tile_in.mask], cached_tile);
-                    LOG_DEBUG("HFA: Cache hit for mask tile [offset=" << mask_offset << ", length=" << tile_length
-                                                                      << "]");
-                } else {
-                    // Cache miss - extract and cache this tile
-                    LOG_DEBUG("HFA: Cache miss for mask tile [offset=" << mask_offset << ", length=" << tile_length
-                                                                       << "], extracting...");
-
-                    // Use pre-allocated mask buffer for this tile
-                    ov::SoPtr<ov::ITensor> cached_mask_tile =
-                        m_hfa_runtime_ctx->get_mask_tile_buffer(next_available_mask_buffer_idx);
-
-                    // Extract mask data into the pre-allocated buffer
-                    hfa_extract_and_copy_tile(attention_mask_tensor,
-                                              cached_mask_tile,
-                                              MASK_KV_SEQ_DIM,
-                                              mask_offset,
-                                              tile_length,
-                                              "Mask");
-
-                    // Cache the extracted tile for future reuse
-                    m_hfa_runtime_ctx->cache_mask_tile(attention_mask_tensor,
-                                                       mask_offset,
-                                                       tile_length,
-                                                       cached_mask_tile);
-
-                    // Use the cached tensor for this inference
-                    request->set_tensor(model->inputs()[tile_in.mask], cached_mask_tile);
-
-                    // Move to next pre-allocated buffer for next cache miss
-                    next_available_mask_buffer_idx++;
-                }
-            } else {
-                // Cache is disabled - extract mask tile on-the-fly directly into tile buffer
-                LOG_DEBUG("HFA: Extracting mask tile on-the-fly [offset=" << mask_offset << ", length=" << tile_length
-                                                                          << "] (cache disabled)");
-                hfa_extract_and_copy_tile(attention_mask_tensor,
-                                          mask_tile_buffer,
-                                          MASK_KV_SEQ_DIM,
-                                          mask_offset,
-                                          tile_length,
-                                          "Mask");
-            }
-        }
-
-        // Execute tile (async mode pre-initializes next state buffer in parallel if optimizations enabled)
-        if (async) {
-            request->start_async();
-            if (m_hfa_runtime_ctx && m_hfa_runtime_ctx->has_state_buffers()) {
-                m_hfa_runtime_ctx->prepare_next_state_buffers();
-            }
-            request->wait();
-        } else {
-            request->infer();
-        }
-    };
-
     int64_t mask_tile_offset = 0;
     int64_t kv_tile_offset = 0;
 
     // Process regular tiles (all but the last one)
     // Each regular tile processes past KV cache and outputs intermediate states (acc, max, d)
     for (int64_t tile_idx = 0; tile_idx < num_tiles - 1; ++tile_idx) {
-        process_tile(regular_tile_request,
-                     hfa_desc._compiled_tile_model,
-                     past_key_tensor,
-                     past_value_tensor,
-                     kv_tile_offset,
-                     mask_tile_offset,
-                     tile_size);
-
+        hfa_process_tile(regular_tile_request,
+                         hfa_desc._compiled_tile_model,
+                         past_key_tensor,
+                         past_value_tensor,
+                         attention_mask_tensor,
+                         kv_tile_offset,
+                         mask_tile_offset,
+                         tile_size,
+                         K_SEQ_DIM,
+                         V_SEQ_DIM,
+                         tile_in,
+                         next_available_mask_buffer_idx);
         kv_tile_offset += tile_size;
         mask_tile_offset += tile_size;
     }
@@ -1759,14 +1667,19 @@ void ov::npuw::JustInferRequest::run_hfa_tiled_inference(std::size_t real_idx, s
         const int64_t mask_total_length = attention_mask_tensor->get_shape()[MASK_KV_SEQ_DIM];
         const int64_t final_mask_offset = mask_total_length - final_tile_length;
 
-        process_tile(final_tile_request,
-                     hfa_desc._compiled_final_tile_model,
-                     present_key_tensor,
-                     present_value_tensor,
-                     0,
-                     final_mask_offset,
-                     final_tile_length,
-                     true);  // async: pre-init next state buffer
+        hfa_process_tile(final_tile_request,
+                         hfa_desc._compiled_final_tile_model,
+                         present_key_tensor,
+                         present_value_tensor,
+                         attention_mask_tensor,
+                         0,
+                         final_mask_offset,
+                         final_tile_length,
+                         K_SEQ_DIM,
+                         V_SEQ_DIM,
+                         tile_in,
+                         next_available_mask_buffer_idx,
+                         true);  // async
     }
 
     // Switch to other buffer for next inference (only if optimizations enabled)

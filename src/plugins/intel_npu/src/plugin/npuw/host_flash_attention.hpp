@@ -197,7 +197,7 @@ struct HostFlashAttentionInfo {
     } _sdpa_indices;
 
     // Pre-cached tile input indices
-    struct {
+    struct HFATileInputIndices {
         std::size_t q = 0u;
         std::size_t k = 0u;
         std::size_t v = 0u;
