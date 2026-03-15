@@ -18,7 +18,6 @@
 #include "openvino/runtime/iremote_context.hpp"
 #include "openvino/runtime/make_tensor.hpp"
 #include "openvino/runtime/tensor.hpp"
-#include "perf.hpp"
 #include "spatial.hpp"
 
 namespace ov {
@@ -73,8 +72,7 @@ private:
 class JustInferRequest final : public IBaseInferRequest, public ISubrequestAccessor {
 public:
     explicit JustInferRequest(const std::shared_ptr<ov::npuw::CompiledModel>& compiled_model);
-    using MS = ov::npuw::perf::metric<ov::npuw::perf::MSec>;
-    ov::npuw::perf::Profile<MS> m_llm_profile;
+
     ////////////////////////////////////
     // Implement ISubrequestAccessor interface
     ov::SoPtr<ov::IAsyncInferRequest> get_subrequest(size_t idx) override;
@@ -186,21 +184,6 @@ protected:
 
     // MoE executor (encapsulates MoE inference logic and profiling)
     std::unique_ptr<ov::npuw::moe::MoEExecutor> m_moe_executor;
-
-private:
-    void hfa_process_tile(ov::SoPtr<ov::IAsyncInferRequest>& request,
-                          const ov::SoPtr<ov::Model>& model,
-                          const ov::SoPtr<ov::ITensor>& k_source,
-                          const ov::SoPtr<ov::ITensor>& v_source,
-                          const ov::SoPtr<ov::ITensor>& attention_mask_tensor,
-                          int64_t kv_offset,
-                          int64_t mask_offset,
-                          int64_t tile_length,
-                          uint32_t K_SEQ_DIM,
-                          uint32_t V_SEQ_DIM,
-                          const compiled::HostFlashAttentionInfo::HFATileInputIndices& tile_in,
-                          size_t& next_available_mask_buffer_idx,
-                          bool async = false);
 };
 
 }  // namespace npuw
