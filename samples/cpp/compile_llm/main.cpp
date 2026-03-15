@@ -108,7 +108,130 @@ auto compute_mean_skip_first = [](const std::vector<double>& times, size_t skip 
     return sum / (times.size() - skip);
 };
 
-int main(int argc, char** argv) {
+using namespace ov;
+
+int create_model() {
+    (void)make_random_tensor;
+    constexpr size_t BATCH = 1;
+    constexpr size_t HEAD_DIM = 128;
+    constexpr size_t HEAD_NUM = 32;
+
+    constexpr size_t NODE_NUM = 8;
+    constexpr size_t Q_SEQ_LEN = 960;
+    constexpr size_t KV_SEQ_LEN = 1024;
+
+    const ov::Shape q_shape{BATCH, HEAD_NUM, Q_SEQ_LEN, HEAD_DIM};
+    const ov::Shape kv_tile_shape{BATCH, HEAD_NUM, KV_SEQ_LEN, HEAD_DIM};
+    const ov::Shape mask_tile_shape{BATCH, 1, Q_SEQ_LEN, KV_SEQ_LEN};
+    const ov::element::Type& dtype = ov::element::f16;
+
+    auto past_output = std::make_shared<op::v0::Parameter>(dtype, q_shape);
+    past_output->set_friendly_name("past_output");
+    past_output->get_output_tensor(0).set_names({"past_output"});
+
+    auto past_max = std::make_shared<op::v0::Parameter>(dtype, Shape{q_shape[0], q_shape[1], q_shape[2]});
+    past_max->set_friendly_name("past_max");
+    past_max->get_output_tensor(0).set_names({"past_max"});
+
+    auto past_sum = std::make_shared<op::v0::Parameter>(dtype, Shape{q_shape[0], q_shape[1], q_shape[2]});
+    past_sum->set_friendly_name("past_sum");
+    past_sum->get_output_tensor(0).set_names({"past_sum"});
+
+    auto query = std::make_shared<op::v0::Parameter>(dtype, q_shape);
+    query->set_friendly_name("Q1");
+    query->get_output_tensor(0).set_names({"Q1"});
+
+    auto mask = std::make_shared<op::v0::Parameter>(dtype, mask_tile_shape);
+    mask->set_friendly_name("mask");
+
+    std::vector<std::shared_ptr<op::v0::Parameter>> keys;
+    std::vector<std::shared_ptr<op::v0::Parameter>> values;
+    keys.reserve(NODE_NUM);
+    values.reserve(NODE_NUM);
+
+    for (size_t i = 0; i < NODE_NUM; ++i) {
+        auto k = std::make_shared<op::v0::Parameter>(dtype, kv_tile_shape);
+        k->set_friendly_name("K" + std::to_string(i));
+        k->get_output_tensor(0).set_names({"K" + std::to_string(i)});
+        keys.push_back(k);
+
+        auto v = std::make_shared<op::v0::Parameter>(dtype, kv_tile_shape);
+        v->set_friendly_name("V" + std::to_string(i));
+        v->get_output_tensor(0).set_names({"V" + std::to_string(i)});
+        values.push_back(v);
+    }
+
+    Output<Node> acc = past_output;
+    Output<Node> mx = past_max;
+    Output<Node> sm = past_sum;
+
+    for (size_t i = 0; i < NODE_NUM; ++i) {
+        ov::intel_npu::op::FlashAttentionTile::Config cfg;
+        cfg.is_head = false;
+        // cfg.is_tail = false;
+        cfg.is_tail = (i == NODE_NUM - 1);
+
+        auto fa =
+            std::make_shared<ov::intel_npu::op::FlashAttentionTile>(query, keys[i], values[i], acc, mx, sm, mask, cfg);
+        fa->set_friendly_name("flash_attention_tile_" + std::to_string(i));
+        acc = fa->output(0);
+        mx = fa->output(1);
+        sm = fa->output(2);
+    }
+    ParameterVector params{past_output, past_max, past_sum, query};
+    for (size_t i = 0; i < NODE_NUM; ++i) {
+        params.push_back(keys[i]);
+        params.push_back(values[i]);
+    }
+    params.push_back(mask);
+
+    constexpr size_t LAST_Q_SEQ_LEN = 960;
+    constexpr size_t LAST_KV_SEQ_LEN = 1024;
+    if (0) {
+        auto last_k = std::make_shared<op::v0::Parameter>(dtype, ov::Shape{BATCH, HEAD_NUM, LAST_KV_SEQ_LEN, HEAD_DIM});
+        auto last_v = std::make_shared<op::v0::Parameter>(dtype, ov::Shape{BATCH, HEAD_NUM, LAST_KV_SEQ_LEN, HEAD_DIM});
+        auto last_mask =
+            std::make_shared<op::v0::Parameter>(dtype, ov::Shape{BATCH, 1, LAST_Q_SEQ_LEN, LAST_KV_SEQ_LEN});
+        ov::intel_npu::op::FlashAttentionTile::Config cfg;
+        cfg.is_head = false;
+        cfg.is_tail = true;
+        last_k->set_friendly_name("K" + std::to_string(NODE_NUM));
+        last_k->get_output_tensor(0).set_names({"K" + std::to_string(NODE_NUM)});
+        last_v->set_friendly_name("V" + std::to_string(NODE_NUM));
+        last_v->get_output_tensor(0).set_names({"V" + std::to_string(NODE_NUM)});
+        last_mask->set_friendly_name("last_mask");
+        last_mask->get_output_tensor(0).set_names({"last_mask"});
+
+        auto fa =
+            std::make_shared<ov::intel_npu::op::FlashAttentionTile>(query, last_k, last_v, acc, mx, sm, last_mask, cfg);
+        fa->set_friendly_name("flash_attention_tile_" + std::to_string(NODE_NUM));
+        acc = fa->output(0);
+        mx = fa->output(1);
+        sm = fa->output(2);
+
+        params.push_back(last_k);
+        params.push_back(last_v);
+        params.push_back(last_mask);
+    }
+
+    ResultVector results{std::make_shared<op::v0::Result>(acc),
+                         std::make_shared<op::v0::Result>(mx),
+                         std::make_shared<op::v0::Result>(sm)};
+    auto model = std::make_shared<Model>(results, params, "FlashAttention" + std::to_string(NODE_NUM) + "Tiles");
+
+    const auto xml_path = "flash_attention_" + std::to_string(NODE_NUM) + "_" + std::to_string(Q_SEQ_LEN) + "_" +
+                          std::to_string(KV_SEQ_LEN) + ".xml";
+    const auto bin_path = "flash_attention_" + std::to_string(NODE_NUM) + "_" + std::to_string(Q_SEQ_LEN) + "_" +
+                          std::to_string(KV_SEQ_LEN) + ".bin";
+
+    ov::serialize(model, xml_path, bin_path);
+
+    std::cout << "Saved model XML: " << xml_path << std::endl;
+    std::cout << "Saved model BIN: " << bin_path << std::endl;
+    return 0;
+}
+
+int run_perf_test() {
     const std::string device = "NPU";
     const size_t num_iters = 200;
 
@@ -218,4 +341,9 @@ int main(int argc, char** argv) {
     }
     // std::cout << "\nAll iterations completed." << std::endl;
     return 0;
+}
+
+int main(){
+    // return run_perf_test();
+    return create_model();
 }
