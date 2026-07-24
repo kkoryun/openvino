@@ -4,13 +4,26 @@
 
 #include "weights_bank.hpp"
 
+#include <execinfo.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <sstream>
+
 #include "logging.hpp"
 #include "openvino/core/parallel.hpp"
 #include "serialization.hpp"
 #include "util.hpp"
 
 using ov::npuw::weights::Bank;
+
 using ov::npuw::weights::LazyTensor;
+
+namespace {
+std::atomic<std::size_t> g_bank_total_bytes{0};
+std::atomic<std::size_t> g_bank_total_tensors{0};
+}  // namespace
 
 class BankManager {
 public:
@@ -40,6 +53,7 @@ Bank::Bank(const std::shared_ptr<const ov::ICore>& core, const std::string& allo
     : m_core(core),
       m_alloc_device(alloc_device),
       m_bank_name(bank_name) {
+    LOG_ERROR("Creating weights bank: " << m_bank_name << " alloc_device=" << m_alloc_device);
     if (m_bank_name.empty()) {
         auto unique_name = ov::npuw::util::generate_random_string();
         LOG_WARN("Got an empty name for weights bank! Using a uniquely generated instead: " << unique_name);
@@ -48,6 +62,14 @@ Bank::Bank(const std::shared_ptr<const ov::ICore>& core, const std::string& allo
 }
 
 int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
+    {
+        auto _name = tensor.get_const_name();
+        std::string _name_str = _name ? *_name : std::string("<non-const>");
+        LOG_ERROR("Registering LazyTensor in weights bank: " << m_bank_name << " device=" << device
+                                                         << " tensor=" << tensor.eval_meta().shape
+                                                         << " type=" << tensor.eval_meta().type
+                                                         << " name=" << _name_str);
+    }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
     std::unique_lock guard(m_mutex);
@@ -69,6 +91,7 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
 }
 
 ov::Tensor Bank::get(int64_t uid, const std::string& device) {
+    LOG_ERROR("Getting tensor from weights bank: " << m_bank_name << " device=" << device << " uid=" << uid);
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
     std::unique_lock guard(m_mutex);
@@ -89,7 +112,9 @@ struct TensorToAllocate {
 };
 
 void Bank::evaluate_and_allocate() {
+    LOG_ERROR("Evaluating and allocating weights bank...");
     std::unique_lock guard(m_mutex);
+    const char* bank_fn = "Bank::evaluate_and_allocate";
 
     for (auto&& bank : m_device_banks) {
         const auto& device_for_alloc = bank.first;
@@ -104,28 +129,49 @@ void Bank::evaluate_and_allocate() {
             }
         }
 
+        LOG_ERROR("[WEIGHT_BANK] fn=" << bank_fn << " evaluate_and_allocate() device=" << device_for_alloc
+                                      << " tensors_to_process=" << to_process.size()
+                                      << " already_resident=" << (device_bank.storage.size() - to_process.size()));
+        const auto t0 = std::chrono::steady_clock::now();
+
         if (device_for_alloc == "CPU") {
             evaluate_cpu(device_bank, to_process);
         } else {
             evaluate_and_allocate_on_device(device_bank, to_process, device_for_alloc);
         }
+
+        const auto ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        LOG_ERROR("[WEIGHT_BANK] fn=" << bank_fn << " device=" << device_for_alloc << " materialized "
+                                      << to_process.size() << " tensors in " << ms << " ms (running total bytes read="
+                                      << g_bank_total_bytes.load() / float(1024 * 1024)
+                                      << " MB, tensors=" << g_bank_total_tensors.load() << " )");
     }  // for (m_device_banks)
 }
 
 void Bank::evaluate_cpu(Bank::DeviceBank& device_bank, const std::vector<LazyTensor>& to_process) {
     // Note: not locking here. This is a private function, so Bank should handle the locks around it
     // as we lock in evaluate_and_allocate() now.
+    const char* cpu_fn = "Bank::evaluate_cpu";
     ov::parallel_for(to_process.size(), [&](std::size_t idx) {
         const auto& lt = to_process[idx];
         auto iter_device_registered = device_bank.registered_tensors.find(lt);
         NPUW_ASSERT(iter_device_registered != device_bank.registered_tensors.end() &&
                     "Tensor should be registered first!");
         auto uid = iter_device_registered->second;
+        const auto t0 = std::chrono::steady_clock::now();
         auto t = lt.eval();
         device_bank.storage.at(uid).tensor = ov::Tensor(t.get_element_type(), t.get_shape());
         // Get ownership of the weights, might be a mmaped object during import
         t.copy_to(device_bank.storage.at(uid).tensor);
         const_cast<LazyTensor&>(lt).detach();
+        const auto us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+        const auto bytes = t.get_byte_size();
+        g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_BANK] fn=" << cpu_fn << " CPU uid=" << uid << " size_mb=" << bytes / float(1024 * 1024)
+                                      << " MB eval_copy_us=" << us);
     });
 }
 
@@ -141,6 +187,7 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
                                            const std::string& device) {
     // Note: not locking here. This is a private function, so Bank should handle the locks around it
     // as we lock in evaluate_and_allocate() now.
+    const char* device_fn = "Bank::evaluate_and_allocate_on_device";
     std::vector<TensorToAllocate> uids_to_allocated;
     uids_to_allocated.reserve(uid_count);
 
@@ -171,6 +218,7 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
         auto& allocated = uids_to_allocated[idx];
         auto& stored_tensor = device_bank.storage.at(allocated.uid);
 
+        const auto t0 = std::chrono::steady_clock::now();
         auto transformed = stored_tensor.lt.eval();
         transformed.copy_to(allocated.allocated_tensor);
         stored_tensor.tensor = std::move(allocated.allocated_tensor);
@@ -179,10 +227,18 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
         // not needed anymore (transformations, if any, and copies are done)
         // Note: this is the non-CPU path!
         const_cast<LazyTensor&>(stored_tensor.lt).detach();
+        const auto us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+        const auto bytes = transformed.get_byte_size();
+        g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_BANK] fn=" << device_fn << " device=" << device << " uid=" << allocated.uid
+                                      << " size_mb=" << bytes / float(1024 * 1024) << " MB eval_copy_us=" << us);
     });
 }
 
 bool Bank::is_remote(int64_t uid) const {
+    LOG_ERROR("Checking if tensor is remote in weights bank: " << m_bank_name << " uid=" << uid);
     // FIXME: make generic
     std::unique_lock guard(m_mutex);
 

@@ -6,6 +6,8 @@
 
 #include <memory>
 #include <variant>
+#include <optional>
+#include <string>
 
 #include "openvino/op/constant.hpp"
 #include "openvino/runtime/shared_buffer.hpp"
@@ -65,6 +67,7 @@ public:
     ov::Tensor eval() const;
     std::size_t get_hash() const;
     std::vector<Transform> get_transformations() const;
+    std::optional<std::string> get_const_name() const;
     void detach();
 
     struct Meta {
@@ -101,6 +104,11 @@ public:
     void read_weight(const ov::npuw::s11n::WeightsContext& ctx);
     void detach();
     void serialize(ov::npuw::orc::Stream& stream);
+
+    std::optional<std::string> get_node_friendly_name() const {
+        if (m_node) return m_node->get_friendly_name();
+        return std::nullopt;
+    }
 
 private:
     std::shared_ptr<ov::op::v0::Constant> m_node = nullptr;

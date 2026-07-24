@@ -4,6 +4,12 @@
 
 #include "lazy_tensor.hpp"
 
+#include <execinfo.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <sstream>
 #include <tuple>
 #include <type_traits>
 #include <variant>
@@ -20,6 +26,18 @@
 #include "util.hpp"
 
 using ov::npuw::weights::LazyTensor;
+
+namespace {
+std::atomic<std::size_t> g_bytes_from_node{0};
+std::atomic<std::size_t> g_bytes_from_mmap{0};
+std::atomic<std::size_t> g_bytes_from_cache{0};
+std::atomic<std::size_t> g_mmap_open_count{0};
+std::atomic<std::size_t> g_weight_read_seq{0};
+
+std::size_t weight_read_seq() {
+    return g_weight_read_seq.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace
 
 namespace ov {
 namespace npuw {
@@ -58,14 +76,21 @@ bool Const::operator==(const Const& other) const {
 }
 
 ov::Tensor Const::eval() const {
+    const char* read_fn = "Const::eval";
     if (m_node) {
-        return ov::npuw::util::copy_tensor_from_const(m_node);
+        auto t = ov::npuw::util::copy_tensor_from_const(m_node);
+        g_bytes_from_node.fetch_add(t.get_byte_size(), std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=NODE offset=" << m_offset
+                                    << " size=" << t.get_byte_size() / float(1024 * 1024)
+                                    << " MB shape=" << m_cached_shape << " type=" << m_cached_type);
+        return t;
     }
 
     // Weightless import case. Mmmap CPU weight on demand to avoid allocating all weights at once.
     if (!m_weights_path.empty() || m_handle_provider) {
         NPUW_ASSERT(!m_read_from_bin &&
                     "Trying to read weight from weights file, but the weight has been already deserialized!");
+        const auto t0 = std::chrono::steady_clock::now();
         std::shared_ptr<ov::MappedMemory> mapped_memory;
         // Use handle_provider if available, otherwise use default mmap
         if (m_handle_provider) {
@@ -76,10 +101,22 @@ ov::Tensor Const::eval() const {
         }
         m_mmaped_weights =
             std::make_shared<ov::npuw::s11n::Weights>(mapped_memory->data(), mapped_memory->size(), mapped_memory);
+        const auto mmap_ms =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+        g_bytes_from_mmap.fetch_add(m_byte_size, std::memory_order_relaxed);
+        g_mmap_open_count.fetch_add(1, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=MMAP offset=" << m_offset
+                                    << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                    << " shape=" << m_cached_shape << " type=" << m_cached_type << " map_setup_us="
+                                    << mmap_ms << " file_size=" << mapped_memory->size() / float(1024 * 1024) << " MB"
+                                    << " path=" << (m_weights_path.empty() ? std::string("<handle>") : m_weights_path));
         return ov::Tensor(m_cached_type, m_cached_shape, m_mmaped_weights->get_ptr(m_offset));
     }
 
     NPUW_ASSERT(m_read_from_bin && "Underlying data should have been read first! Or the tensor is already detached.");
+    g_bytes_from_cache.fetch_add(m_read_from_bin.get_byte_size(), std::memory_order_relaxed);
+    LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=CACHED offset=" << m_offset
+                                << " size=" << m_read_from_bin.get_byte_size() / float(1024 * 1024));
     return m_read_from_bin;
 }
 
@@ -98,6 +135,7 @@ LazyTensor::Meta Const::eval_meta() const {
 }
 
 void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
+    const char* read_weight_fn = "Const::read_weight";
     NPUW_ASSERT(!m_node &&
                 "LazyTensor can only read weight when it's being deserialized and not created from a Constant!");
     if (m_read_from_bin) {
@@ -119,6 +157,11 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
             auto src_data = bf16_tensor.data<ov::bfloat16>();
             auto dst_data = m_read_from_bin.data<dst_type>();
             ov::reference::convert_from_bf16_to_f16_with_clamp(src_data, dst_data, m_read_from_bin.get_size());
+            g_bytes_from_cache.fetch_add(m_byte_size, std::memory_order_relaxed);
+            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=BF16_EAGER offset="
+                                        << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                        << " shape=" << m_cached_shape
+                                        << " (read immediately during blob deserialization)");
         } else {
             // Each LazyTensor will mmap the whole weights file on demand (in eval()).
             // It doesn't introduce extra allocation, however it allows to gradually 1 by 1
@@ -129,6 +172,10 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
             m_weights_path = ctx.weights_path;
             // Also save handle_provider if available
             m_handle_provider = ctx.handle_provider;
+            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=DEFERRED offset="
+                                        << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                        << " shape=" << m_cached_shape
+                                        << " (registered for later mmap, no data read yet)");
         }
     } else {
         auto it = ctx.consts_cache.find({m_offset, m_byte_size});
@@ -136,6 +183,11 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
         m_read_from_bin = ov::npuw::util::tensor_from_const(it->second);
         NPUW_ASSERT(m_read_from_bin.get_byte_size() == m_byte_size && m_read_from_bin.get_shape() == m_cached_shape &&
                     m_read_from_bin.get_element_type() == m_cached_type);
+        g_bytes_from_cache.fetch_add(m_byte_size, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=CONSTS_CACHE offset="
+                                    << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                    << " shape=" << m_cached_shape
+                                    << " (read from in-memory MODEL_PTR constants cache)");
     }
 }
 
@@ -742,6 +794,15 @@ std::vector<LazyTensor::Transform> LazyTensor::get_transformations() const {
     return transformations;
 }
 
+
+std::optional<std::string> LazyTensor::get_const_name() const {
+    for (const auto &tr : get_transformations()) {
+        if (const auto *c = std::get_if<op::Const>(&tr)) {
+            return c->get_node_friendly_name();
+        }
+    }
+    return std::nullopt;
+}
 void LazyTensor::detach() {
     if (m_impl) {
         m_impl->detach();
