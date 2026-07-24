@@ -812,6 +812,15 @@ std::optional<std::size_t> LazyTensor::get_const_offset() const {
     }
     return std::nullopt;
 }
+
+std::optional<std::size_t> LazyTensor::get_const_size() const {
+    for (const auto &tr : get_transformations()) {
+        if (const auto *c = std::get_if<op::Const>(&tr)) {
+            return c->get_node_byte_size();
+        }
+    }
+    return std::nullopt;
+}
 void LazyTensor::detach() {
     if (m_impl) {
         m_impl->detach();

@@ -69,6 +69,7 @@ public:
     std::vector<Transform> get_transformations() const;
     std::optional<std::string> get_const_name() const;
     std::optional<std::size_t> get_const_offset() const;
+    std::optional<std::size_t> get_const_size() const;
     void detach();
 
     struct Meta {
@@ -112,6 +113,7 @@ public:
     }
 
     std::size_t get_node_offset() const { return m_offset; }
+    std::size_t get_node_byte_size() const { return m_byte_size; }
 
 private:
     std::shared_ptr<ov::op::v0::Constant> m_node = nullptr;

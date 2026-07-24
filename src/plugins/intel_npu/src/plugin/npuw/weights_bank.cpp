@@ -67,10 +67,12 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
         std::string _name_str = _name ? *_name : std::string("<non-const>");
         auto _offset = tensor.get_const_offset();
         std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
+        auto _size = tensor.get_const_size();
+        std::string _size_str = _size ? std::to_string(*_size) : std::string("<na>");
         LOG_ERROR("Registering LazyTensor in weights bank: " << m_bank_name << " device=" << device
                                                          << " tensor=" << tensor.eval_meta().shape
                                                          << " type=" << tensor.eval_meta().type
-                                                         << " name=" << _name_str << " offset=" << _offset_str);
+                                                         << " name=" << _name_str << " offset=" << _offset_str << " size_bytes=" << _size_str << " running_total_bytes=" << g_bank_total_bytes.load());
     }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
@@ -146,7 +148,7 @@ void Bank::evaluate_and_allocate() {
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         LOG_ERROR("[WEIGHT_BANK] fn=" << bank_fn << " device=" << device_for_alloc << " materialized "
                                       << to_process.size() << " tensors in " << ms << " ms (running total bytes read="
-                                      << g_bank_total_bytes.load() / float(1024 * 1024)
+                                      << g_bank_total_bytes.load() << " bytes (" << g_bank_total_bytes.load() / float(1024 * 1024)
                                       << " MB, tensors=" << g_bank_total_tensors.load() << " )");
     }  // for (m_device_banks)
 }
