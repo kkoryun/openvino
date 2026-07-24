@@ -23,6 +23,7 @@ using ov::npuw::weights::LazyTensor;
 namespace {
 std::atomic<std::size_t> g_bank_total_bytes{0};
 std::atomic<std::size_t> g_bank_total_tensors{0};
+std::atomic<std::size_t> g_bank_predicted_bytes{0};
 }  // namespace
 
 class BankManager {
@@ -69,10 +70,10 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
         std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
         auto _size = tensor.get_const_size();
         std::string _size_str = _size ? std::to_string(*_size) : std::string("<na>");
-        LOG_ERROR("Registering LazyTensor in weights bank: " << m_bank_name << " device=" << device
-                                                         << " tensor=" << tensor.eval_meta().shape
-                                                         << " type=" << tensor.eval_meta().type
-                                                         << " name=" << _name_str << " offset=" << _offset_str << " size_bytes=" << _size_str << " running_total_bytes=" << g_bank_total_bytes.load());
+        LOG_ERROR("Registering LazyTensor in weights bank: "
+                  << m_bank_name << " device=" << device << " name=" << _name_str << " tensor="
+                  << tensor.eval_meta().shape << " type=" << tensor.eval_meta().type << " offset=" << _offset_str
+                  << " size_bytes=" << _size_str << " running_total_bytes=" << g_bank_total_bytes.load());
     }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
@@ -147,8 +148,9 @@ void Bank::evaluate_and_allocate() {
         const auto ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         LOG_ERROR("[WEIGHT_BANK] fn=" << bank_fn << " device=" << device_for_alloc << " materialized "
-                                      << to_process.size() << " tensors in " << ms << " ms (running total bytes read="
-                                      << g_bank_total_bytes.load() << " bytes (" << g_bank_total_bytes.load() / float(1024 * 1024)
+                                      << to_process.size() << " tensors in " << ms
+                                      << " ms (running total bytes read=" << g_bank_total_bytes.load() << " bytes ("
+                                      << g_bank_total_bytes.load() / float(1024 * 1024)
                                       << " MB, tensors=" << g_bank_total_tensors.load() << " )");
     }  // for (m_device_banks)
 }
@@ -173,6 +175,8 @@ void Bank::evaluate_cpu(Bank::DeviceBank& device_bank, const std::vector<LazyTen
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         const auto bytes = t.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        // reduce predicted outstanding bytes by the actual materialized amount
+        g_bank_predicted_bytes.fetch_sub(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
         LOG_ERROR("[WEIGHT_BANK] fn=" << cpu_fn << " CPU uid=" << uid << " size_mb=" << bytes / float(1024 * 1024)
                                       << " MB eval_copy_us=" << us);
@@ -235,6 +239,8 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         const auto bytes = transformed.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
+        // reduce predicted outstanding bytes by the actual materialized amount
+        g_bank_predicted_bytes.fetch_sub(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
         LOG_ERROR("[WEIGHT_BANK] fn=" << device_fn << " device=" << device << " uid=" << allocated.uid
                                       << " size_mb=" << bytes / float(1024 * 1024) << " MB eval_copy_us=" << us);
