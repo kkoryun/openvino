@@ -69,10 +69,18 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
         std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
         auto _size = tensor.get_const_size();
         std::string _size_str = _size ? std::to_string(*_size) : std::string("<na>");
+        auto _wc_info = tensor.get_const_weightless_cache_info();
+        std::string _wc_str = "<na>";
+        if (_wc_info) {
+            std::ostringstream oss;
+            oss << "original_size=" << _wc_info->original_size << " bin_offset=" << _wc_info->bin_offset
+                << " original_dtype=" << _wc_info->original_dtype;
+            _wc_str = oss.str();
+        }
         LOG_ERROR("Registering LazyTensor in weights bank: "
                   << m_bank_name << " device=" << device << " name=" << _name_str << " tensor="
                   << tensor.eval_meta().shape << " type=" << tensor.eval_meta().type << " offset=" << _offset_str
-                  << " size_bytes=" << _size_str);
+                  << " size_bytes=" << _size_str << " weightless_cache[" << _wc_str << "]");
     }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 

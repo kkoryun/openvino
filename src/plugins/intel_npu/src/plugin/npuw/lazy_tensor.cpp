@@ -75,6 +75,19 @@ bool Const::operator==(const Const& other) const {
             m_cached_ptr == other.m_cached_ptr);
 }
 
+std::optional<LazyTensor::WeightlessCacheInfo> Const::get_weightless_cache_info() const {
+    if (!m_node) {
+        return std::nullopt;
+    }
+    const auto& rt_info = m_node->get_rt_info();
+    auto weightless_cache_attr = rt_info.find(ov::WeightlessCacheAttribute::get_type_info_static());
+    if (weightless_cache_attr == rt_info.end()) {
+        return std::nullopt;
+    }
+    const auto& attr = weightless_cache_attr->second.as<ov::WeightlessCacheAttribute>();
+    return LazyTensor::WeightlessCacheInfo{attr.original_size, attr.bin_offset, attr.original_dtype};
+}
+
 ov::Tensor Const::eval() const {
     const char* read_fn = "Const::eval";
     if (m_node) {
@@ -821,6 +834,16 @@ std::optional<std::size_t> LazyTensor::get_const_size() const {
     }
     return std::nullopt;
 }
+
+std::optional<LazyTensor::WeightlessCacheInfo> LazyTensor::get_const_weightless_cache_info() const {
+    for (const auto &tr : get_transformations()) {
+        if (const auto *c = std::get_if<op::Const>(&tr)) {
+            return c->get_weightless_cache_info();
+        }
+    }
+    return std::nullopt;
+}
+
 void LazyTensor::detach() {
     if (m_impl) {
         m_impl->detach();

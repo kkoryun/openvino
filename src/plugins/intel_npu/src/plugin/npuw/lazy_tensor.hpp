@@ -70,6 +70,15 @@ public:
     std::optional<std::string> get_const_name() const;
     std::optional<std::size_t> get_const_offset() const;
     std::optional<std::size_t> get_const_size() const;
+
+    // Mirrors ov::WeightlessCacheAttribute fields, queried directly from the Constant's rt_info.
+    struct WeightlessCacheInfo {
+        std::size_t original_size;
+        std::size_t bin_offset;
+        ov::element::Type original_dtype;
+    };
+    std::optional<WeightlessCacheInfo> get_const_weightless_cache_info() const;
+
     void detach();
 
     struct Meta {
@@ -114,6 +123,8 @@ public:
 
     std::size_t get_node_offset() const { return m_offset; }
     std::size_t get_node_byte_size() const { return m_byte_size; }
+
+    std::optional<LazyTensor::WeightlessCacheInfo> get_weightless_cache_info() const;
 
 private:
     std::shared_ptr<ov::op::v0::Constant> m_node = nullptr;
