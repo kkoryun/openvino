@@ -65,10 +65,12 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
     {
         auto _name = tensor.get_const_name();
         std::string _name_str = _name ? *_name : std::string("<non-const>");
+        auto _offset = tensor.get_const_offset();
+        std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
         LOG_ERROR("Registering LazyTensor in weights bank: " << m_bank_name << " device=" << device
                                                          << " tensor=" << tensor.eval_meta().shape
                                                          << " type=" << tensor.eval_meta().type
-                                                         << " name=" << _name_str);
+                                                         << " name=" << _name_str << " offset=" << _offset_str);
     }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
