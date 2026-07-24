@@ -23,7 +23,6 @@ using ov::npuw::weights::LazyTensor;
 namespace {
 std::atomic<std::size_t> g_bank_total_bytes{0};
 std::atomic<std::size_t> g_bank_total_tensors{0};
-std::atomic<std::size_t> g_bank_predicted_bytes{0};
 }  // namespace
 
 class BankManager {
@@ -73,7 +72,7 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
         LOG_ERROR("Registering LazyTensor in weights bank: "
                   << m_bank_name << " device=" << device << " name=" << _name_str << " tensor="
                   << tensor.eval_meta().shape << " type=" << tensor.eval_meta().type << " offset=" << _offset_str
-                  << " size_bytes=" << _size_str << " running_total_bytes=" << g_bank_total_bytes.load());
+                  << " size_bytes=" << _size_str);
     }
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
@@ -175,8 +174,6 @@ void Bank::evaluate_cpu(Bank::DeviceBank& device_bank, const std::vector<LazyTen
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         const auto bytes = t.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
-        // reduce predicted outstanding bytes by the actual materialized amount
-        g_bank_predicted_bytes.fetch_sub(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
         LOG_ERROR("[WEIGHT_BANK] fn=" << cpu_fn << " CPU uid=" << uid << " size_mb=" << bytes / float(1024 * 1024)
                                       << " MB eval_copy_us=" << us);
@@ -239,8 +236,6 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         const auto bytes = transformed.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
-        // reduce predicted outstanding bytes by the actual materialized amount
-        g_bank_predicted_bytes.fetch_sub(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
         LOG_ERROR("[WEIGHT_BANK] fn=" << device_fn << " device=" << device << " uid=" << allocated.uid
                                       << " size_mb=" << bytes / float(1024 * 1024) << " MB eval_copy_us=" << us);
