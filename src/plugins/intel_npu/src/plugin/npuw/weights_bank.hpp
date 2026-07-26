@@ -35,8 +35,11 @@ public:
 
     Bank(const std::shared_ptr<const ov::ICore>& core, const std::string& alloc_device, const std::string& bank_name);
 
-    // Register LazyTensor in a bank if it's not there. Returns LazyTensor's unique id
-    int64_t registerLT(const LazyTensor& tensor, const std::string& device);
+    // Register LazyTensor in a bank if it's not there. Returns LazyTensor's unique id.
+    // subgraph_id uniquely identifies the submodel/subgraph across all CompiledModel instances that may
+    // share this Bank (e.g. prefill/kvcache/lm_head for LLM pipelines) - used to track which weights are
+    // shared/reused across subgraphs. Recommended format: "<compiled_model_name>#<submodel_idx>".
+    int64_t registerLT(const LazyTensor& tensor, const std::string& device, const std::string& subgraph_id);
 
     // Get registered, allocated and evaluated tensor on a specified device
     ov::Tensor get(int64_t uid, const std::string& device);
@@ -47,6 +50,10 @@ public:
     bool is_remote(int64_t uid) const;
 
     std::string get_name() const;
+
+    // Logs, for every tensor uid registered by more than one subgraph, the full list
+    // of subgraph indices that share it. Helps understand cross-subgraph weight reuse.
+    void log_weight_sharing_summary() const;
 
 private:
     friend class ov::npuw::LLMCompiledModel;
@@ -63,6 +70,10 @@ private:
         std::unordered_map<LazyTensor, int64_t, LazyTensor::Hash> registered_tensors;
     };
     std::unordered_map<std::string, DeviceBank> m_device_banks;
+
+    // Tracks, for each registered tensor uid, the list of subgraph ids that registered it.
+    // A uid with more than one entry means that weight is physically shared/reused across subgraphs.
+    std::unordered_map<int64_t, std::vector<std::string>> m_uid_subgraphs;
 
     void evaluate_cpu(DeviceBank& device_bank, const std::vector<LazyTensor>& to_process);
     void evaluate_and_allocate_on_device(DeviceBank& device_bank,

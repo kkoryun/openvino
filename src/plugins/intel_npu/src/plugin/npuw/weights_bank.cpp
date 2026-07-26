@@ -61,27 +61,22 @@ Bank::Bank(const std::shared_ptr<const ov::ICore>& core, const std::string& allo
     }
 }
 
-int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
-    {
-        auto _name = tensor.get_const_name();
-        std::string _name_str = _name ? *_name : std::string("<non-const>");
-        auto _offset = tensor.get_const_offset();
-        std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
-        auto _size = tensor.get_const_size();
-        std::string _size_str = _size ? std::to_string(*_size) : std::string("<na>");
-        auto _wc_info = tensor.get_const_weightless_cache_info();
-        std::string _wc_str = "<na>";
-        if (_wc_info) {
-            std::ostringstream oss;
-            oss << "original_size=" << _wc_info->original_size << " bin_offset=" << _wc_info->bin_offset
-                << " original_dtype=" << _wc_info->original_dtype;
-            _wc_str = oss.str();
-        }
-        LOG_ERROR("Registering LazyTensor in weights bank: "
-                  << m_bank_name << " device=" << device << " name=" << _name_str << " tensor="
-                  << tensor.eval_meta().shape << " type=" << tensor.eval_meta().type << " offset=" << _offset_str
-                  << " size_bytes=" << _size_str << " weightless_cache[" << _wc_str << "]");
+int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device, const std::string& subgraph_id) {
+    auto _name = tensor.get_const_name();
+    std::string _name_str = _name ? *_name : std::string("<non-const>");
+    auto _offset = tensor.get_const_offset();
+    std::string _offset_str = _offset ? std::to_string(*_offset) : std::string("<na>");
+    auto _size = tensor.get_const_size();
+    std::string _size_str = _size ? std::to_string(*_size) : std::string("<na>");
+    auto _wc_info = tensor.get_const_weightless_cache_info();
+    std::string _wc_str = "<na>";
+    if (_wc_info) {
+        std::ostringstream oss;
+        oss << "original_size=" << _wc_info->original_size << " bin_offset=" << _wc_info->bin_offset
+            << " original_dtype=" << _wc_info->original_dtype;
+        _wc_str = oss.str();
     }
+
     const std::string& device_for_alloc = m_alloc_device.empty() ? device : m_alloc_device;
 
     std::unique_lock guard(m_mutex);
@@ -89,17 +84,73 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device) {
     auto& device_bank = m_device_banks[device_for_alloc];
 
     auto iter_registered = device_bank.registered_tensors.find(tensor);
+    int64_t uid = -1;
+    bool is_new = false;
     if (iter_registered == device_bank.registered_tensors.end()) {
-        auto uid = uid_count++;
+        uid = uid_count++;
         device_bank.registered_tensors[tensor] = uid;
         device_bank.storage[uid] = {tensor, ov::Tensor()};
-        return uid;
+        is_new = true;
     } else {
-        // Already registered - can be safely detach the incoming tensor
+        uid = iter_registered->second;
+    }
+
+    // Track which subgraphs share this uid, and report reuse across subgraphs.
+    auto& sharers = m_uid_subgraphs[uid];
+    std::string _shared_with_str = "<none>";
+    if (!sharers.empty()) {
+        std::ostringstream oss;
+        for (std::size_t i = 0; i < sharers.size(); ++i) {
+            oss << sharers[i];
+            if (i + 1 < sharers.size()) {
+                oss << ",";
+            }
+        }
+        _shared_with_str = oss.str();
+    }
+    LOG_ERROR("Registering LazyTensor in weights bank: "
+              << m_bank_name << " device=" << device << " subgraph=" << subgraph_id << " name=" << _name_str
+              << " tensor=" << tensor.eval_meta().shape << " type=" << tensor.eval_meta().type
+              << " offset=" << _offset_str << " size_bytes=" << _size_str << " weightless_cache[" << _wc_str << "]"
+              << " uid=" << uid << " status=" << (is_new ? "NEW" : "REUSED")
+              << " already_registered_by_subgraphs=[" << _shared_with_str << "]");
+    sharers.push_back(subgraph_id);
+
+    if (!is_new) {
+        // Already registered - can safely detach the incoming tensor
         const_cast<LazyTensor&>(tensor).detach();
     }
 
-    return iter_registered->second;
+    return uid;
+}
+
+void Bank::log_weight_sharing_summary() const {
+    std::unique_lock guard(m_mutex);
+    for (const auto& kv : m_uid_subgraphs) {
+        const auto uid = kv.first;
+        const auto& subgraphs = kv.second;
+        if (subgraphs.size() <= 1) {
+            continue;  // not shared across subgraphs
+        }
+        std::string name_str = "<unknown>";
+        for (const auto& dev_kv : m_device_banks) {
+            auto it = dev_kv.second.storage.find(uid);
+            if (it != dev_kv.second.storage.end()) {
+                auto n = it->second.lt.get_const_name();
+                name_str = n ? *n : std::string("<non-const>");
+                break;
+            }
+        }
+        std::ostringstream oss;
+        for (std::size_t i = 0; i < subgraphs.size(); ++i) {
+            oss << subgraphs[i];
+            if (i + 1 < subgraphs.size()) {
+                oss << ",";
+            }
+        }
+        LOG_ERROR("[WEIGHT_SHARING] bank=" << m_bank_name << " uid=" << uid << " name=" << name_str
+                                            << " subgraphs=[" << oss.str() << "] num_subgraphs=" << subgraphs.size());
+    }
 }
 
 ov::Tensor Bank::get(int64_t uid, const std::string& device) {

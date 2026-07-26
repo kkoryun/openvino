@@ -340,6 +340,8 @@ ov::npuw::CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
       m_cfg(m_options_desc),
       m_name(model->get_friendly_name()),
       m_loaded_from_cache(false) {
+    LOG_ERROR("ov::npuw::CompiledModel::CompiledModel for model: " << m_name);
+
     init_profiling();
 
     // Note: we need to identify original bf16 constants for potential weightless deserialization later
@@ -371,6 +373,8 @@ ov::npuw::CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
     // Initialize weights bank
     const std::string weights_bank_opt = m_cfg.get<::intel_npu::NPUW_WEIGHTS_BANK>();
     const std::string wbank_alloc = m_cfg.get<::intel_npu::NPUW_WEIGHTS_BANK_ALLOC>();
+    LOG_ERROR("Create weights bank for model: " << m_name << ", bank: " << weights_bank_opt
+                                                << ", alloc: " << wbank_alloc);
     m_weights_bank = ov::npuw::weights::bank(weights_bank_opt, plugin->get_core(), wbank_alloc);
 
     LOG_VERB("*** Original model ***");
@@ -734,6 +738,7 @@ ov::npuw::CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
     }
 
     // Finalize memory in closures and weight banks
+
     finalize_weights_bank();
     detach_memory();
 
@@ -1271,6 +1276,7 @@ std::shared_ptr<ov::npuw::CompiledModel> ov::npuw::CompiledModel::deserialize_or
     };
 
     auto consume_weights_bank = [&](std::istream& child_source) {
+        LOG_ERROR("consume_weights_bank...");
         ov::npuw::orc::ScopedReadSection child(child_source);
         if (child.header().type != weights::Bank::kOrcType) {
             OPENVINO_THROW("Unexpected ORC child type ID ", child.header().type, " in NPUW CompiledModel container");
@@ -1406,7 +1412,7 @@ void ov::npuw::CompiledModel::set_weights_bank(std::shared_ptr<ov::npuw::weights
 }
 
 void ov::npuw::CompiledModel::finalize_weights_bank() {
-    LOG_INFO("Finalizing weights bank...");
+    LOG_ERROR("Start finalize_weights_bank()");
     std::shared_future<void> weights_bank_evaluation = std::async(std::launch::async, [&]() {
         // Register lazy tensors
         for (std::size_t idx = 0; idx < m_compiled_submodels.size(); ++idx) {
@@ -1423,10 +1429,14 @@ void ov::npuw::CompiledModel::finalize_weights_bank() {
                 if (comp_model_desc.closure.unsafe_get().closure[tidx]) {
                     continue;  // host-side closure
                 }
-                comp_model_desc.closure.unsafe_get().closure_uid[tidx] =
-                    m_weights_bank->registerLT(comp_model_desc.lazy_closure[tidx], submodel_device(real_idx));
+                comp_model_desc.closure.unsafe_get().closure_uid[tidx] = m_weights_bank->registerLT(
+                    comp_model_desc.lazy_closure[tidx],
+                    submodel_device(real_idx),
+                    m_name + "#" + std::to_string(idx));
             }
         }
+
+        m_weights_bank->log_weight_sharing_summary();
 
         // Evaluate and allocate all LazyTensors inside the bank
         m_weights_bank->evaluate_and_allocate();
