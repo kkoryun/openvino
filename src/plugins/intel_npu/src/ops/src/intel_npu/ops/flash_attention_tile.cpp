@@ -537,6 +537,7 @@ static bool evaluate_flash_attention_impl(ov::TensorVector& outputs,
 }
 
 inline bool FlashAttentionTile::evaluate(ov::TensorVector& outputs, const ov::TensorVector& inputs) const {
+    std::cout << "FlashAttentionTile::evaluate() called" << std::endl;
     auto input_type = get_input_element_type(QUERY);
     if (input_type == ov::element::f32) {
         return evaluate_flash_attention_impl(outputs, inputs, m_config);

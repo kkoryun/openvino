@@ -124,6 +124,7 @@ void ov::npuw::UnfoldInferRequest::infer() {
                 wait_and_clear(previous_requests);
                 past_repl_id = this_repl_id;
             }
+            log_subgraph_run(idx, this_repl_id);
             subr->start_async();
             previous_requests.push_back(subr);
             prepare(idx + 1);
@@ -137,6 +138,8 @@ void ov::npuw::UnfoldInferRequest::infer() {
                 prepare(idx + 1);
                 continue;
             }
+            const auto& comp_model_desc = m_npuw_model->m_compiled_submodels[idx];
+            log_subgraph_run(idx, comp_model_desc.replaced_by.value_or(idx));
             subr->start_async();
             prepare(idx + 1);
             subr->wait();

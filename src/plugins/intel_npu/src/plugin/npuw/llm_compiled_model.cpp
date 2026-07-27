@@ -1377,7 +1377,7 @@ std::shared_ptr<ov::npuw::LLMCompiledModel> ov::npuw::LLMCompiledModel::import_m
     std::istream& stream,
     const std::shared_ptr<const ov::IPlugin>& plugin,
     const ov::AnyMap& properties) {
-    LOG_INFO("Deserializing LLMCompiledModel...");
+    LOG_ERROR("Deserializing LLMCompiledModel...");
     LOG_BLOCK();
 
     using namespace ov::npuw::s11n;
@@ -1428,6 +1428,8 @@ std::shared_ptr<ov::npuw::LLMCompiledModel> ov::npuw::LLMCompiledModel::import_m
 
     auto read_and_finalize_banks = [&](std::istream& model_stream,
                                        const std::shared_ptr<ov::npuw::LLMCompiledModel>& compiled) {
+        LOG_ERROR("read_and_finalize_banks...");
+
         auto stream = Stream::reader(model_stream);
         std::string bank_name;
         stream & bank_name;

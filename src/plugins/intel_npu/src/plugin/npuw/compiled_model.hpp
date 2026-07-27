@@ -297,6 +297,11 @@ private:
 
         bool forced_to_fcall = false;
 
+        // Human-readable function/repeat id assigned by partitioning (e.g. "REP0095", "FCEW000"),
+        // empty for subgraphs that are neither a function body nor a function call. Kept around (not
+        // serialized) purely so runtime code (e.g. JustInferRequest::legacy_infer) can print it.
+        std::string funcall_id;
+
         // Metrics
         execution_stats stat;
 

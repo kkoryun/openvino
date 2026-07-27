@@ -218,6 +218,12 @@ protected:
     std::string subgr_name(std::size_t idx) const;
     std::string subgr_path_suffix(std::size_t idx) const;
 
+    // Logs the identity (name, function/repeat id, function-call target) of the subgraph
+    // that is about to be actually infer()'d/start_async()'d - called from every real
+    // execution site (JustInferRequest::legacy_infer, JustInferRequest::unsafe_during,
+    // UnfoldInferRequest::infer) so it fires regardless of which execution path is taken.
+    void log_subgraph_run(std::size_t idx, std::size_t real_idx) const;
+
     // TODO: And this should probably go to some TensorDumper, etc
     // if we go over-designing the things.
     std::string iter_path_suffix(std::size_t idx) const;

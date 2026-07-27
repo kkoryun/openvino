@@ -5,6 +5,11 @@
 
 #include "base_sync_infer_request.hpp"
 
+#include <execinfo.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <sstream>
 
 #include "attn/attn_subgraph.hpp"
@@ -18,6 +23,17 @@
 #include "moe/moe_subgraph.hpp"
 #include "openvino/core/parallel.hpp"
 #include "util.hpp"
+
+namespace {
+std::atomic<std::size_t> g_unpack_bytes_direct{0};
+std::atomic<std::size_t> g_unpack_bytes_copy{0};
+std::atomic<std::size_t> g_unpack_bytes_dequant{0};
+std::atomic<std::size_t> g_call_seq{0};
+
+std::size_t call_seq() {
+    return g_call_seq.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace
 
 ov::npuw::IBaseInferRequest::IBaseInferRequest(const std::shared_ptr<ov::npuw::CompiledModel>& compiled_model)
     : ov::ISyncInferRequest(compiled_model),
@@ -332,6 +348,8 @@ void ov::npuw::IBaseInferRequest::init_gio() {
 }
 
 void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const char* unpack_fn = "IBaseInferRequest::unpack_closure";
     auto& comp_model_desc = m_npuw_model->m_compiled_submodels[idx];
 
     NPUW_ASSERT(comp_model_desc.replaced_by);
@@ -341,6 +359,8 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
     // Skip MoE expert submodels - MoE experts require special unpacking logic according to the
     // expert selection, which is handled later in the inference flow.
     if (ov::npuw::moe::has_compiled_experts(func_desc.pipeline)) {
+        LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " idx=" << idx << " real_idx=" << real_idx
+                                      << " skipped (MoE experts handled separately)");
         return;
     }
 
@@ -350,6 +370,9 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
     std::vector<std::size_t> closure_copy_required;
 
     auto& desc_closure = comp_model_desc.closure.get().closure;
+
+    LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " idx=" << idx << " real_idx=" << real_idx
+                                  << " closures=" << desc_closure.size());
 
     for (std::size_t cidx = 0u; cidx < desc_closure.size(); cidx++) {
         auto& closure = desc_closure[cidx];
@@ -372,10 +395,19 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
                 closure_copy_required.push_back(cidx);
             } else {
                 // Easy case, just set one to another
+                const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
                 request->set_tensor(iport, ov::get_tensor_impl(closure));
+                g_unpack_bytes_direct.fetch_add(bytes, std::memory_order_relaxed);
+                LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " DIRECT cidx=" << cidx << " size="
+                                              << bytes / float(1024 * 1024) << " MB");
             }
         }
     }  // for(closure)
+
+    const auto closure_easy_count = desc_closure.size() - closure_copy_required.size() - closure_unpack_required.size();
+    LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " idx=" << idx << " easy_set="
+                                  << closure_easy_count << " copy_required=" << closure_copy_required.size()
+                                  << " unpack_required=" << closure_unpack_required.size());
 
     // m_ms_unpack += ov::npuw::perf::ms_to_run([&](){
     ov::parallel_for(closure_copy_required.size(), [&](std::size_t j) {
@@ -384,7 +416,11 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
         const auto closure_param_id = comp_model_desc.param_base + cidx;
         auto& iport = func_desc.compiled_model->inputs()[closure_param_id];
         auto clparam = request->get_tensor(iport);
+        const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
         ov::get_tensor_impl(closure)->copy_to(clparam._ptr);
+        g_unpack_bytes_copy.fetch_add(bytes, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " COPY cidx=" << cidx << " size="
+                                      << bytes / float(1024 * 1024) << " MB");
     });
     // }); // ms_to_run
 
@@ -416,7 +452,18 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
             // Unpacking this weight doesn't require scaling
             ov::npuw::util::unpack(ov::get_tensor_impl(closure), clparam);
         }
+        const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
+        g_unpack_bytes_dequant.fetch_add(bytes, std::memory_order_relaxed);
+        LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " DEQUANT cidx=" << cidx << " size="
+                                      << bytes / float(1024 * 1024) << " MB");
     }
+
+    const auto us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+    LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " idx=" << idx << " done in " << us
+                                  << " us (running totals: direct=" << g_unpack_bytes_direct.load() / float(1024 * 1024)
+                                  << " MB copy=" << g_unpack_bytes_copy.load() / float(1024 * 1024)
+                                  << " MB dequant=" << g_unpack_bytes_dequant.load() / float(1024 * 1024) << " MB)");
 }
 
 void ov::npuw::IBaseInferRequest::bind_global_params(std::size_t idx, RqPtr request) {
@@ -768,6 +815,13 @@ void ov::npuw::IBaseInferRequest::dump_output_tensors(std::size_t idx) {
 
 std::string ov::npuw::IBaseInferRequest::subgr_name(std::size_t idx) const {
     return m_npuw_model->m_name + "_" + std::to_string(idx);
+}
+
+void ov::npuw::IBaseInferRequest::log_subgraph_run(std::size_t idx, std::size_t real_idx) const {
+    const auto& funcall_id = m_npuw_model->m_compiled_submodels[idx].funcall_id;
+    LOG_ERROR("Running inference for Subgraph[" << idx << "]"
+              << (real_idx != idx ? " (function call to Subgraph[" + std::to_string(real_idx) + "])" : "")
+              << (funcall_id.empty() ? "" : " funcall=" + funcall_id) << " name=" << subgr_name(idx));
 }
 
 std::string ov::npuw::IBaseInferRequest::subgr_path_suffix(std::size_t idx) const {

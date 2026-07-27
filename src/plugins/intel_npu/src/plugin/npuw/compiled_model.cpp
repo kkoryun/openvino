@@ -540,6 +540,7 @@ ov::npuw::CompiledModel::CompiledModel(const std::shared_ptr<ov::Model>& model,
             continue;
         }
         LOG_INFO("Creating Subgraph[" << id << "]...");
+        m_compiled_submodels[id].funcall_id = subgraph._funcall;
         if (subgraph._funcall.empty()) {
             // NOT a function call - an easy case!
             m_compiled_submodels[id].model = std::make_shared<ov::Model>(subgraph._results,
