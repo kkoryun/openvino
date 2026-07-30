@@ -44,6 +44,7 @@ namespace npuw {
 namespace weights {
 namespace op {
 Const::Const(const std::shared_ptr<ov::op::v0::Constant>& n) : m_node(n) {
+    m_cached_name = m_node->get_friendly_name();
     m_cached_type = m_node->get_element_type();
     m_cached_shape = m_node->get_shape();
     m_cached_ptr = m_node->get_data_ptr();
@@ -93,9 +94,11 @@ ov::Tensor Const::eval() const {
     if (m_node) {
         auto t = ov::npuw::util::copy_tensor_from_const(m_node);
         g_bytes_from_node.fetch_add(t.get_byte_size(), std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=NODE offset=" << m_offset
-                                    << " size=" << t.get_byte_size() / float(1024 * 1024)
-                                    << " MB shape=" << m_cached_shape << " type=" << m_cached_type);
+        if (t.get_byte_size() / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=NODE offset=" << m_offset
+                                        << " name=" << (m_cached_name.empty() ? std::string("<unknown>") : m_cached_name)
+                                        << " size=" << t.get_byte_size() / float(1024 * 1024)
+                                        << " MB shape=" << m_cached_shape << " type=" << m_cached_type);
         return t;
     }
 
@@ -118,18 +121,23 @@ ov::Tensor Const::eval() const {
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         g_bytes_from_mmap.fetch_add(m_byte_size, std::memory_order_relaxed);
         g_mmap_open_count.fetch_add(1, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=MMAP offset=" << m_offset
-                                    << " size=" << m_byte_size / float(1024 * 1024) << " MB"
-                                    << " shape=" << m_cached_shape << " type=" << m_cached_type << " map_setup_us="
-                                    << mmap_ms << " file_size=" << mapped_memory->size() / float(1024 * 1024) << " MB"
-                                    << " path=" << (m_weights_path.empty() ? std::string("<handle>") : m_weights_path));
+        if (m_byte_size / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=MMAP offset=" << m_offset
+                                        << " name=" << (m_cached_name.empty() ? std::string("<unknown>") : m_cached_name)
+                                        << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                        << " shape=" << m_cached_shape << " type=" << m_cached_type
+                                        << " map_setup_us=" << mmap_ms << " file_size="
+                                        << mapped_memory->size() / float(1024 * 1024) << " MB"
+                                        << " path=" << (m_weights_path.empty() ? std::string("<handle>") : m_weights_path));
         return ov::Tensor(m_cached_type, m_cached_shape, m_mmaped_weights->get_ptr(m_offset));
     }
 
     NPUW_ASSERT(m_read_from_bin && "Underlying data should have been read first! Or the tensor is already detached.");
     g_bytes_from_cache.fetch_add(m_read_from_bin.get_byte_size(), std::memory_order_relaxed);
-    LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=CACHED offset=" << m_offset
-                                << " size=" << m_read_from_bin.get_byte_size() / float(1024 * 1024));
+    if (m_read_from_bin.get_byte_size() / float(1024 * 1024) > 0.1f)
+        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_fn << " src=CACHED offset=" << m_offset
+                                    << " name=" << (m_cached_name.empty() ? std::string("<unknown>") : m_cached_name)
+                                    << " size=" << m_read_from_bin.get_byte_size() / float(1024 * 1024));
     return m_read_from_bin;
 }
 
@@ -171,10 +179,13 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
             auto dst_data = m_read_from_bin.data<dst_type>();
             ov::reference::convert_from_bf16_to_f16_with_clamp(src_data, dst_data, m_read_from_bin.get_size());
             g_bytes_from_cache.fetch_add(m_byte_size, std::memory_order_relaxed);
-            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=BF16_EAGER offset="
-                                        << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
-                                        << " shape=" << m_cached_shape
-                                        << " (read immediately during blob deserialization)");
+            if (m_byte_size / float(1024 * 1024) > 0.1f)
+                LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn
+                                            << " src=BF16_EAGER offset=" << m_offset
+                                            << " name=" << (m_cached_name.empty() ? std::string("<unknown>") : m_cached_name)
+                                            << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                            << " shape=" << m_cached_shape
+                                            << " (read immediately during blob deserialization)");
         } else {
             // Each LazyTensor will mmap the whole weights file on demand (in eval()).
             // It doesn't introduce extra allocation, however it allows to gradually 1 by 1
@@ -185,10 +196,13 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
             m_weights_path = ctx.weights_path;
             // Also save handle_provider if available
             m_handle_provider = ctx.handle_provider;
-            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=DEFERRED offset="
-                                        << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
-                                        << " shape=" << m_cached_shape
-                                        << " (registered for later mmap, no data read yet)");
+            if (m_byte_size / float(1024 * 1024) > 0.1f)
+                LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn
+                                            << " src=DEFERRED offset=" << m_offset
+                                            << " name=" << (m_cached_name.empty() ? std::string("<unknown>") : m_cached_name)
+                                            << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                            << " shape=" << m_cached_shape
+                                            << " (registered for later mmap, no data read yet)");
         }
     } else {
         auto it = ctx.consts_cache.find({m_offset, m_byte_size});
@@ -197,10 +211,13 @@ void Const::read_weight(const ov::npuw::s11n::WeightsContext& ctx) {
         NPUW_ASSERT(m_read_from_bin.get_byte_size() == m_byte_size && m_read_from_bin.get_shape() == m_cached_shape &&
                     m_read_from_bin.get_element_type() == m_cached_type);
         g_bytes_from_cache.fetch_add(m_byte_size, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn << " src=CONSTS_CACHE offset="
-                                    << m_offset << " size=" << m_byte_size / float(1024 * 1024) << " MB"
-                                    << " shape=" << m_cached_shape
-                                    << " (read from in-memory MODEL_PTR constants cache)");
+        if (m_byte_size / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_READ] #" << weight_read_seq() << " fn=" << read_weight_fn
+                                        << " src=CONSTS_CACHE offset=" << m_offset
+                                        << " name=" << it->second->get_friendly_name()
+                                        << " size=" << m_byte_size / float(1024 * 1024) << " MB"
+                                        << " shape=" << m_cached_shape
+                                        << " (read from in-memory MODEL_PTR constants cache)");
     }
 }
 

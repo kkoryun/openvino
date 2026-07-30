@@ -1055,9 +1055,9 @@ TEST(SerializationTest, OVTypes_WeightsBank_cpu_roundtrip) {
     auto second = make_weightless_constant<float>(ov::element::f32, ov::Shape{2}, {3.0f, 4.0f}, first->get_byte_size());
 
     ov::npuw::weights::Bank var(nullptr, "CPU", "test-bank");
-    const auto uid0 = var.registerLT(ov::npuw::weights::LazyTensor(first), "CPU");
-    const auto uid0_dup = var.registerLT(ov::npuw::weights::LazyTensor(first), "CPU");
-    const auto uid1 = var.registerLT(ov::npuw::weights::LazyTensor(second), "CPU");
+    const auto uid0 = var.registerLT(ov::npuw::weights::LazyTensor(first), "CPU", "test-subgraph");
+    const auto uid0_dup = var.registerLT(ov::npuw::weights::LazyTensor(first), "CPU", "test-subgraph");
+    const auto uid1 = var.registerLT(ov::npuw::weights::LazyTensor(second), "CPU", "test-subgraph");
     EXPECT_EQ(uid0, uid0_dup);
     EXPECT_NE(uid0, uid1);
 

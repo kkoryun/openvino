@@ -116,6 +116,13 @@ int64_t Bank::registerLT(const LazyTensor& tensor, const std::string& device, co
               << " already_registered_by_subgraphs=[" << _shared_with_str << "]");
     sharers.push_back(subgraph_id);
 
+    // Remember the human-readable name for this uid while we still have it - the source
+    // LazyTensor's underlying Constant node may be detach()-ed shortly after this call
+    // (see below), at which point the name becomes unrecoverable from the LazyTensor itself.
+    if (_name && m_uid_names.find(uid) == m_uid_names.end()) {
+        m_uid_names[uid] = *_name;
+    }
+
     if (!is_new) {
         // Already registered - can safely detach the incoming tensor
         const_cast<LazyTensor&>(tensor).detach();
@@ -133,14 +140,39 @@ void Bank::log_weight_sharing_summary() const {
             continue;  // not shared across subgraphs
         }
         std::string name_str = "<unknown>";
+        std::optional<std::size_t> byte_size;
         for (const auto& dev_kv : m_device_banks) {
             auto it = dev_kv.second.storage.find(uid);
             if (it != dev_kv.second.storage.end()) {
                 auto n = it->second.lt.get_const_name();
                 name_str = n ? *n : std::string("<non-const>");
+                byte_size = it->second.lt.get_const_size();
+                if (!byte_size && it->second.tensor) {
+                    // Fall back to the already-materialized tensor's size (e.g. for
+                    // derived/computed weights that aren't a plain Const).
+                    byte_size = it->second.tensor.get_byte_size();
+                }
                 break;
             }
         }
+        if (name_str == "<non-const>") {
+            // The LazyTensor's own Constant node may have been detach()-ed by now (this
+            // weight is REUSED, see registerLT()). Fall back to the name captured at
+            // registration time - don't call get_name() here, it re-locks m_mutex.
+            auto names_it = m_uid_names.find(uid);
+            if (names_it != m_uid_names.end()) {
+                name_str = names_it->second;
+            }
+        }
+        // Skip tiny weights (e.g. norm scales/biases) to keep the summary focused on
+        // the sizable, actually-interesting shared tensors. Unknown-size entries are
+        // still printed since we can't tell whether they're small or not.
+        constexpr std::size_t kMinBytesToLog = static_cast<std::size_t>(0.1 * 1024 * 1024);
+        if (byte_size && *byte_size < kMinBytesToLog) {
+            continue;
+        }
+        std::string size_str =
+            byte_size ? std::to_string(*byte_size / float(1024 * 1024)) + " MB" : std::string("<unknown>");
         std::ostringstream oss;
         for (std::size_t i = 0; i < subgraphs.size(); ++i) {
             oss << subgraphs[i];
@@ -149,7 +181,8 @@ void Bank::log_weight_sharing_summary() const {
             }
         }
         LOG_ERROR("[WEIGHT_SHARING] bank=" << m_bank_name << " uid=" << uid << " name=" << name_str
-                                            << " subgraphs=[" << oss.str() << "] num_subgraphs=" << subgraphs.size());
+                                            << " size=" << size_str << " subgraphs=[" << oss.str()
+                                            << "] num_subgraphs=" << subgraphs.size());
     }
 }
 
@@ -234,8 +267,9 @@ void Bank::evaluate_cpu(Bank::DeviceBank& device_bank, const std::vector<LazyTen
         const auto bytes = t.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_BANK] fn=" << cpu_fn << " CPU uid=" << uid << " size_mb=" << bytes / float(1024 * 1024)
-                                      << " MB eval_copy_us=" << us);
+        if (bytes / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_BANK] fn=" << cpu_fn << " CPU uid=" << uid << " size_mb=" << bytes / float(1024 * 1024)
+                                          << " MB eval_copy_us=" << us);
     });
 }
 
@@ -296,9 +330,19 @@ void Bank::evaluate_and_allocate_on_device(Bank::DeviceBank& device_bank,
         const auto bytes = transformed.get_byte_size();
         g_bank_total_bytes.fetch_add(bytes, std::memory_order_relaxed);
         g_bank_total_tensors.fetch_add(1, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_BANK] fn=" << device_fn << " device=" << device << " uid=" << allocated.uid
-                                      << " size_mb=" << bytes / float(1024 * 1024) << " MB eval_copy_us=" << us);
+        if (bytes / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_BANK] fn=" << device_fn << " device=" << device << " uid=" << allocated.uid
+                                          << " size_mb=" << bytes / float(1024 * 1024) << " MB eval_copy_us=" << us);
     });
+}
+
+std::optional<std::string> Bank::get_name(int64_t uid) const {
+    std::lock_guard<std::mutex> guard(m_mutex);
+    auto it = m_uid_names.find(uid);
+    if (it == m_uid_names.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 bool Bank::is_remote(int64_t uid) const {

@@ -118,6 +118,10 @@ public:
 
     std::optional<std::string> get_node_friendly_name() const {
         if (m_node) return m_node->get_friendly_name();
+        // The node may have been detach()-ed to save memory (see Bank::registerLT()'s
+        // REUSED path / evaluate_cpu()) - fall back to the name cached at construction
+        // time so callers (e.g. WEIGHT_READ logging) can still report a real name.
+        if (!m_cached_name.empty()) return m_cached_name;
         return std::nullopt;
     }
 
@@ -128,6 +132,7 @@ public:
 
 private:
     std::shared_ptr<ov::op::v0::Constant> m_node = nullptr;
+    std::string m_cached_name;
     ov::element::Type m_cached_type;
     ov::Shape m_cached_shape;
     const void* m_cached_ptr = nullptr;

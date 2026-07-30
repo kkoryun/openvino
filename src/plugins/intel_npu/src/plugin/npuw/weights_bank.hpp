@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <tuple>
 #include <unordered_map>
 
@@ -51,6 +52,12 @@ public:
 
     std::string get_name() const;
 
+    // Best-effort human-readable weight name for a given uid, captured at registerLT()
+    // time (before the originating LazyTensor's underlying Constant node may be detached
+    // to save memory). Returns nullopt if no name was ever recorded for this uid (e.g. the
+    // tensor is not const-derived, such as a fused/derived op with no single backing weight).
+    std::optional<std::string> get_name(int64_t uid) const;
+
     // Logs, for every tensor uid registered by more than one subgraph, the full list
     // of subgraph indices that share it. Helps understand cross-subgraph weight reuse.
     void log_weight_sharing_summary() const;
@@ -74,6 +81,12 @@ private:
     // Tracks, for each registered tensor uid, the list of subgraph ids that registered it.
     // A uid with more than one entry means that weight is physically shared/reused across subgraphs.
     std::unordered_map<int64_t, std::vector<std::string>> m_uid_subgraphs;
+
+    // Tracks, for each registered tensor uid, its human-readable weight name (captured at
+    // registration time, before the source LazyTensor may be detach()-ed). Populated in
+    // registerLT(); consumed by get_name() so runtime code (e.g. unpack_closure logging) can
+    // still show a meaningful name for weights whose LazyTensor has since been detached.
+    std::unordered_map<int64_t, std::string> m_uid_names;
 
     void evaluate_cpu(DeviceBank& device_bank, const std::vector<LazyTensor>& to_process);
     void evaluate_and_allocate_on_device(DeviceBank& device_bank,

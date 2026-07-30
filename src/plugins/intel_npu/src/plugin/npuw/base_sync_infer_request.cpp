@@ -370,6 +370,31 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
     std::vector<std::size_t> closure_copy_required;
 
     auto& desc_closure = comp_model_desc.closure.get().closure;
+    auto& desc_closure_uid = comp_model_desc.closure.get().closure_uid;
+
+    // Best-effort human-readable weight name for a given closure index - falls back to
+    // "<non-const>" when the underlying LazyTensor isn't a plain constant (e.g. it's the
+    // result of a fused/derived op) so log lines below can be correlated with the actual
+    // model weight (see Bank::registerLT(), which uses the very same accessor).
+    auto weight_name = [&](std::size_t wcidx) -> std::string {
+        if (wcidx < comp_model_desc.lazy_closure.size()) {
+            auto name = comp_model_desc.lazy_closure[wcidx].get_const_name();
+            if (name) {
+                return *name;
+            }
+        }
+        // The LazyTensor's own Constant node may have been detach()-ed by now (e.g. this
+        // weight is REUSED and was detached right after the first subgraph registered it -
+        // see Bank::registerLT()). Fall back to the name the Bank captured at registration
+        // time, keyed by the same uid we use to fetch the actual tensor data.
+        if (wcidx < desc_closure_uid.size() && desc_closure_uid[wcidx] != -1) {
+            auto bank_name = m_npuw_model->m_weights_bank->get_name(desc_closure_uid[wcidx]);
+            if (bank_name) {
+                return *bank_name;
+            }
+        }
+        return "<non-const>";
+    };
 
     LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " idx=" << idx << " real_idx=" << real_idx
                                   << " closures=" << desc_closure.size());
@@ -398,8 +423,9 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
                 const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
                 request->set_tensor(iport, ov::get_tensor_impl(closure));
                 g_unpack_bytes_direct.fetch_add(bytes, std::memory_order_relaxed);
-                LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " DIRECT cidx=" << cidx << " size="
-                                              << bytes / float(1024 * 1024) << " MB");
+                if (true || (bytes / float(1024 * 1024) > 0.1f))
+                    LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " DIRECT cidx=" << cidx
+                                                  << " name=" << weight_name(cidx) << " size=" << bytes << " Bytes");
             }
         }
     }  // for(closure)
@@ -419,8 +445,9 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
         const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
         ov::get_tensor_impl(closure)->copy_to(clparam._ptr);
         g_unpack_bytes_copy.fetch_add(bytes, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " COPY cidx=" << cidx << " size="
-                                      << bytes / float(1024 * 1024) << " MB");
+        if (bytes / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " COPY cidx=" << cidx << " name="
+                                          << weight_name(cidx) << " size=" << bytes / float(1024 * 1024) << " MB");
     });
     // }); // ms_to_run
 
@@ -437,25 +464,33 @@ void ov::npuw::IBaseInferRequest::unpack_closure(std::size_t idx, RqPtr request)
         auto& iport = func_desc.compiled_model->inputs()[closure_param_id];
         auto clparam = request->get_tensor(iport);
 
+        const char* dequant_mode = nullptr;
         if (!comp_model_desc.scales.empty() && comp_model_desc.scales[cidx] && comp_model_desc.zerops[cidx]) {
             // Unpacking this weight requires scaling with zero points...
             ov::npuw::util::unpack(ov::get_tensor_impl(closure),
                                    ov::get_tensor_impl(comp_model_desc.zerops[cidx]),
                                    ov::get_tensor_impl(comp_model_desc.scales[cidx]),
                                    clparam);
+            dequant_mode = "scale+zerop";
         } else if (!comp_model_desc.scales.empty() && comp_model_desc.scales[cidx]) {
             // Unpacking this weight requires scaling
             ov::npuw::util::unpack(ov::get_tensor_impl(closure),
                                    ov::get_tensor_impl(comp_model_desc.scales[cidx]),
                                    clparam);
+            dequant_mode = "scale_only";
         } else {
             // Unpacking this weight doesn't require scaling
             ov::npuw::util::unpack(ov::get_tensor_impl(closure), clparam);
+            dequant_mode = "no_scale";
         }
         const auto bytes = ov::get_tensor_impl(closure)->get_byte_size();
         g_unpack_bytes_dequant.fetch_add(bytes, std::memory_order_relaxed);
-        LOG_ERROR("[WEIGHT_UNPACK] #" << call_seq() << " fn=" << unpack_fn << " DEQUANT cidx=" << cidx << " size="
-                                      << bytes / float(1024 * 1024) << " MB");
+        if (bytes / float(1024 * 1024) > 0.1f)
+            LOG_ERROR("[WEIGHT_UNPACK] #"
+                      << call_seq() << " fn=" << unpack_fn << " DEQUANT cidx=" << cidx << " name=" << weight_name(cidx)
+                      << " mode=" << dequant_mode << " src_type=" << ov::get_tensor_impl(closure)->get_element_type()
+                      << " dst_type=" << clparam->get_element_type() << " size=" << bytes / float(1024 * 1024)
+                      << " MB");
     }
 
     const auto us =
@@ -819,8 +854,8 @@ std::string ov::npuw::IBaseInferRequest::subgr_name(std::size_t idx) const {
 
 void ov::npuw::IBaseInferRequest::log_subgraph_run(std::size_t idx, std::size_t real_idx) const {
     const auto& funcall_id = m_npuw_model->m_compiled_submodels[idx].funcall_id;
-    LOG_ERROR("Running inference for Subgraph[" << idx << "]"
-              << (real_idx != idx ? " (function call to Subgraph[" + std::to_string(real_idx) + "])" : "")
+    LOG_ERROR("Running inference for Subgraph["
+              << idx << "]" << (real_idx != idx ? " (function call to Subgraph[" + std::to_string(real_idx) + "])" : "")
               << (funcall_id.empty() ? "" : " funcall=" + funcall_id) << " name=" << subgr_name(idx));
 }
 
