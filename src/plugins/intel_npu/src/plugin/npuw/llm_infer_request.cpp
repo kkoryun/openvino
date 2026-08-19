@@ -9,6 +9,7 @@
 #include <regex>
 
 #include "infer_request_utils.hpp"
+#include "intel_npu/common/itt.hpp"
 #include "llm_block_kvcache_strategy.hpp"
 #include "llm_compiled_model.hpp"
 #include "llm_continuous_kvcache_strategy.hpp"
@@ -1208,6 +1209,7 @@ void ov::npuw::LLMInferRequest::infer_prefill(ov::SoPtr<ov::ITensor> input_ids,
                                               ov::SoPtr<ov::ITensor> per_layer_inputs,
                                               ov::SoPtr<ov::ITensor> visual_pos_masks,
                                               ov::SoPtr<ov::ITensor> deepstack_visual_embeds) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_prefill");
     LOG_DEBUG("Calling inference for prefill model...");
     LOG_BLOCK();
 
@@ -1277,6 +1279,7 @@ void ov::npuw::LLMInferRequest::infer_generate(ov::SoPtr<ov::ITensor> input_ids,
                                                ov::SoPtr<ov::ITensor> position_ids,
                                                ov::SoPtr<ov::ITensor> token_type_ids,
                                                ov::SoPtr<ov::ITensor> per_layer_inputs) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_generate");
     LOG_DEBUG("Calling inference for generate model...");
     LOG_BLOCK();
     auto& kvcache_desc = m_npuw_llm_compiled_model->m_kvcache_desc;
@@ -1437,6 +1440,7 @@ void ov::npuw::LLMInferRequest::infer_generate(ov::SoPtr<ov::ITensor> input_ids,
 }
 
 void ov::npuw::LLMInferRequest::infer() {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer");
     const auto& inputs = get_inputs();
 
     auto input_ids = get_tensor(ov::npuw::util::find_port_by_name(inputs, m_input_ids_name).value());

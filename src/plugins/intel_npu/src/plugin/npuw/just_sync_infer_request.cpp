@@ -14,6 +14,7 @@
 #include "compiled_model.hpp"
 #include "host_flash_attention.hpp"
 #include "infer_request_utils.hpp"  // to utilize copy_tensor_by_dim
+#include "intel_npu/common/itt.hpp"
 #include "logging.hpp"
 #include "moe/moe_subgraph.hpp"
 #include "openvino/core/except.hpp"
@@ -885,6 +886,7 @@ void ov::npuw::JustInferRequest::initialize_moe_executor() {
 }
 
 void ov::npuw::JustInferRequest::run_subrequest_for_success(std::size_t idx) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "JustInferRequest::run_subrequest_for_success");
     auto& comp_model_desc = m_npuw_model->m_compiled_submodels[idx];
     const auto real_idx = comp_model_desc.replaced_by.value_or(idx);
     bool next_prepared = false;

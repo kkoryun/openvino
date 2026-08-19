@@ -20,6 +20,7 @@
 #include "../partitioning/patterns/sdpa.hpp"
 #include "../pyramid_attention.hpp"
 #include "../serialization.hpp"
+#include "intel_npu/common/itt.hpp"
 
 namespace ov {
 namespace npuw {
@@ -387,6 +388,7 @@ void ensure_hfa_requests(ov::npuw::v1::subgraphs::InferContext& ctx, RuntimeStat
 }
 
 void prepare_dynamic(ov::npuw::v1::subgraphs::InferContext& ctx) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::prepare_dynamic");
     auto& state = get_runtime_state(ctx);
     ensure_dynamic_selector(ctx, state);
     state.attention_selector->prepare(get_request(ctx).history_size());
@@ -394,6 +396,7 @@ void prepare_dynamic(ov::npuw::v1::subgraphs::InferContext& ctx) {
 }
 
 void prepare_pyramid(ov::npuw::v1::subgraphs::InferContext& ctx) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::prepare_pyramid");
     auto& request = get_request(ctx);
     auto& state = get_runtime_state(ctx);
     ensure_pyramid_selector(ctx, state);
@@ -409,6 +412,7 @@ void prepare_pyramid(ov::npuw::v1::subgraphs::InferContext& ctx) {
 }
 
 void prepare_hfa(ov::npuw::v1::subgraphs::InferContext& ctx) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::prepare_hfa");
     auto& request = get_request(ctx);
     auto& state = get_runtime_state(ctx);
     ensure_hfa_selector(ctx, state);
@@ -715,6 +719,7 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
             }
 
             void prologue(ov::npuw::v1::subgraphs::InferContext& ctx) override {
+                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::AttnBehavior::prologue");
                 if (ctx.opaque_prologue) {
                     ctx.opaque_prologue();
                 }
@@ -861,12 +866,16 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
             void run(ov::npuw::v1::subgraphs::InferContext& ctx) override {
                 switch (m_kind) {
                 case BehaviorKind::Dynamic:
-                case BehaviorKind::Pyramid:
+                case BehaviorKind::Pyramid: {
+                    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::AttnBehavior::run::PYRAMID/DYNAMIC");
                     ctx.legacy_infer();
                     return;
+                }
                 case BehaviorKind::HFA:
                     if (const auto* hfa_desc = ov::npuw::attn::get_compiled_hfa(
                             get_subgraph_pipeline(ctx, ctx.real_subgraph_idx).context)) {
+                        OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::AttnBehavior::run::HFA");
+
                         auto& state = get_runtime_state(ctx);
                         auto& io = get_behavior_io(state,
                                                    ctx.subgraph_idx,
@@ -963,6 +972,8 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                                                 int64_t tile_length,
                                                 bool async = false,
                                                 bool process_with_mask = true) {
+                            OV_ITT_SCOPED_TASK(HFA_PROCESS_TILE, "HFA::process_tile");
+
                             auto k_tile_buffer = request->get_tensor(model->inputs()[tile_in.k]);
                             auto v_tile_buffer = request->get_tensor(model->inputs()[tile_in.v]);
                             ov::SoPtr<ov::ITensor> mask_tile_buffer;
@@ -980,6 +991,7 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                                 request->set_tensor(model->inputs()[tile_in.k],
                                                     ov::npuw::util::view(k_source, K_SEQ_DIM, kv_offset, tile_length));
                             } else {
+                                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile::extract_k_tile");
                                 extract_and_copy_tile(k_source, k_tile_buffer, K_SEQ_DIM, kv_offset, tile_length, "K");
                             }
 
@@ -993,10 +1005,12 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                                 request->set_tensor(model->inputs()[tile_in.v],
                                                     ov::npuw::util::view(v_source, V_SEQ_DIM, kv_offset, tile_length));
                             } else {
+                                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile::extract_v_tile");
                                 extract_and_copy_tile(v_source, v_tile_buffer, V_SEQ_DIM, kv_offset, tile_length, "V");
                             }
 
                             if (process_with_mask && attention_mask_tensor) {
+                                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile::prepare_mask");
                                 if (can_reuse_tensor_zero_copy(attention_mask_tensor,
                                                                mask_tile_buffer,
                                                                MASK_KV_SEQ_DIM,
@@ -1037,12 +1051,14 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                             }
 
                             if (async) {
+                                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile::infer_async");
                                 request->start_async();
                                 if (state.hfa_runtime_ctx && state.hfa_runtime_ctx->has_state_buffers()) {
                                     state.hfa_runtime_ctx->prepare_next_state_buffers();
                                 }
                                 request->wait();
                             } else {
+                                OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile::infer");
                                 request->infer();
                             }
                         };
@@ -1054,6 +1070,7 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                         const bool uses_mask = hfa_desc->_compiled_tile_model->inputs().size() > tile_in.mask;
 
                         // Iterate through KV blocks; each block contributes block_size/tile_size tiles.
+                        OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::HFA::regular_tile");
                         for (size_t block_idx = 0; block_idx < past_key_blocks.size() && past_kv_tiles > 0;
                              ++block_idx) {
                             const auto& k_block = past_key_blocks[block_idx];
@@ -1081,6 +1098,7 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                                     "HFA: All past KV blocks should contain exactly (num_tiles - 1) tiles");
 
                         if (num_tiles > 0) {
+                            OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::HFA::final_tile");
                             const size_t present_seq_length = present_key_tensor->get_shape()[K_SEQ_DIM];
                             const int64_t final_tile_length = static_cast<int64_t>(present_seq_length);
                             OPENVINO_ASSERT(

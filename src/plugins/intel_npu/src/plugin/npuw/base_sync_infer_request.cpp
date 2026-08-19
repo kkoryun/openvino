@@ -10,6 +10,7 @@
 #include "attn/attn_subgraph.hpp"
 #include "compiled_model.hpp"
 #include "infer_request_utils.hpp"  // to utilize copy_tensor_by_dim
+#include "intel_npu/common/itt.hpp"
 #include "intel_npu/config/npuw.hpp"
 #include "intel_npu/utils/zero/zero_host_tensor.hpp"
 #include "intel_npu/utils/zero/zero_remote_tensor.hpp"
@@ -224,6 +225,7 @@ std::string ov::npuw::IBaseInferRequest::profile_tag(std::size_t idx) const {
 }
 
 void ov::npuw::IBaseInferRequest::infer() {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "IBaseInferRequest::infer");
     m_now_idx.reset();
     prepare_for_infer();
     for (std::size_t idx = 0u; idx < m_num_submodels; idx++) {

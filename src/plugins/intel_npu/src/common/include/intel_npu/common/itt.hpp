@@ -15,6 +15,7 @@ OV_ITT_DOMAIN(LevelZeroBackend, "ov::intel_npu::level_zero_backend");
 // Domain namespace to define NPU Inference phase tasks
 OV_ITT_DOMAIN(InferenceNPU, "ov::phases::npu::inference");
 OV_ITT_DOMAIN(NPUOps, "ov::op::npu");
+OV_ITT_DOMAIN(NPUW, "ov::intel_npu::npuw");
 }  // namespace domains
 }  // namespace itt
 }  // namespace intel_npu

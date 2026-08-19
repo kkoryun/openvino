@@ -6,6 +6,7 @@
 
 #include "attn/attn_subgraph.hpp"
 #include "compiled_model.hpp"
+#include "intel_npu/common/itt.hpp"
 #include "logging.hpp"
 #include "openvino/core/parallel.hpp"
 
@@ -88,6 +89,7 @@ bool ov::npuw::UnfoldInferRequest::valid_subrequest(std::size_t idx) const {
 }
 
 void ov::npuw::UnfoldInferRequest::infer() {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "UnfoldInferRequest::infer");
     const bool do_async = m_npuw_model->m_cfg.get<::intel_npu::NPUW_FUNCALL_ASYNC>();
 
     auto prepare = [&](std::size_t idx) {
