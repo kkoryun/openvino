@@ -613,6 +613,7 @@ void ov::npuw::LLMInferRequest::bind_generate_variant(int64_t prompt_length) {
 }
 
 void ov::npuw::LLMInferRequest::prepare_for_new_conversation(int64_t prompt_length) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::prepare_for_new_conversation");
     namespace uu = ov::npuw::util;
 
     // A continued prefill that failed mid-way may leave its delta base behind;
@@ -897,6 +898,7 @@ void ov::npuw::LLMInferRequest::infer_chunked_prefill(ov::SoPtr<ov::ITensor> inp
                                                       ov::SoPtr<ov::ITensor> per_layer_inputs,
                                                       ov::SoPtr<ov::ITensor> visual_pos_masks,
                                                       ov::SoPtr<ov::ITensor> deepstack_visual_embeds) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_chunked_prefill");
     LOG_DEBUG("Calling chunked inference for prefill model.");
     LOG_BLOCK();
 
@@ -1141,6 +1143,7 @@ void ov::npuw::LLMInferRequest::infer_whole_prefill(ov::SoPtr<ov::ITensor> input
                                                     ov::SoPtr<ov::ITensor> per_layer_inputs,
                                                     ov::SoPtr<ov::ITensor> visual_pos_masks,
                                                     ov::SoPtr<ov::ITensor> deepstack_visual_embeds) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_whole_prefill");
     LOG_DEBUG("Calling inference for prefill model in a single launch.");
     LOG_BLOCK();
 
@@ -1206,11 +1209,11 @@ void ov::npuw::LLMInferRequest::infer_prefill(ov::SoPtr<ov::ITensor> input_ids,
                                               ov::SoPtr<ov::ITensor> per_layer_inputs,
                                               ov::SoPtr<ov::ITensor> visual_pos_masks,
                                               ov::SoPtr<ov::ITensor> deepstack_visual_embeds) {
-    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_prefill");
+    const auto prompt_length = input_ids->get_shape()[layer_ids::INPUT_IDS_SEQ_LEN_DIM];
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_prefill#" + std::to_string(prompt_length));
     LOG_DEBUG("Calling inference for prefill model...");
     LOG_BLOCK();
 
-    const auto prompt_length = input_ids->get_shape()[layer_ids::INPUT_IDS_SEQ_LEN_DIM];
     auto& kvcache_desc = m_npuw_llm_compiled_model->m_kvcache_desc;
     // In continuation mode the caller tensors hold only the delta; the combined
     // keep plus delta budget is validated by prepare_for_continued_prefill().
@@ -1257,6 +1260,7 @@ void ov::npuw::LLMInferRequest::infer_prefill(ov::SoPtr<ov::ITensor> input_ids,
     });
 
     m_llm_profile["1/prefill:4.lm_head"].record([&]() {
+        OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_prefill:lm_head");
         if (m_lm_head_request) {
             LOG_DEBUG("Calling inference for LM head model.");
             m_lm_head_request->infer();
@@ -1311,6 +1315,7 @@ void ov::npuw::LLMInferRequest::prepare_for_continued_prefill(uint32_t keep,
                                                               ov::SoPtr<ov::ITensor> input_ids,
                                                               ov::SoPtr<ov::ITensor> attention_mask,
                                                               ov::SoPtr<ov::ITensor> position_ids) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_prefill:prepare_for_continued_prefill");
     LOG_DEBUG("Continuing the conversation, keep=" << keep);
 
     auto& kvcache_desc = m_npuw_llm_compiled_model->m_kvcache_desc;
@@ -1490,6 +1495,7 @@ void ov::npuw::LLMInferRequest::infer_generate(ov::SoPtr<ov::ITensor> input_ids,
     };
 
     if (m_lm_head_request) {
+        OV_ITT_SCOPED_TASK(itt::domains::NPUW, "LLMInferRequest::infer_generate:lm_head");
         LOG_DEBUG("Calling inference for LM head model asynchronously");
         m_lm_head_request->start_async();
         do_update_kvcache();

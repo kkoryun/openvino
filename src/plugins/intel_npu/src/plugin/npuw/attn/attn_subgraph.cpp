@@ -18,6 +18,7 @@
 #include "../logging.hpp"
 #include "../partitioning/partitioning.hpp"
 #include "../partitioning/patterns/sdpa.hpp"
+#include "../perf.hpp"
 #include "../pyramid_attention.hpp"
 #include "../serialization.hpp"
 #include "intel_npu/common/itt.hpp"
@@ -28,6 +29,8 @@ namespace attn {
 namespace {
 
 constexpr uint32_t ATTN_KV_DIM = 3;
+
+using MS = ov::npuw::perf::metric<ov::npuw::perf::MSec>;
 
 struct BehaviorIO {
     std::vector<ov::SoPtr<ov::ITensor>> inputs;
@@ -989,8 +992,7 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                                                 int64_t tile_length,
                                                 bool async = false,
                                                 bool process_with_mask = true) {
-                            OV_ITT_SCOPED_TASK(HFA_PROCESS_TILE, "HFA::process_tile");
-
+                            OV_ITT_SCOPED_TASK(itt::domains::NPUW, "HFA::process_tile");
                             auto k_tile_buffer = request->get_tensor(model->inputs()[tile_in.k]);
                             auto v_tile_buffer = request->get_tensor(model->inputs()[tile_in.v]);
                             ov::SoPtr<ov::ITensor> mask_tile_buffer;
@@ -1099,28 +1101,29 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                         const bool uses_mask = hfa_desc->_compiled_tile_model->inputs().size() > tile_in.mask;
 
                         // Iterate through KV blocks; each block contributes block_size/tile_size tiles.
-                        OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::HFA::regular_tile");
-                        for (size_t block_idx = 0; block_idx < past_key_blocks.size() && past_kv_tiles > 0;
-                             ++block_idx) {
-                            const auto& k_block = past_key_blocks[block_idx];
-                            const auto& v_block = past_value_blocks[block_idx];
-                            const int64_t block_size = static_cast<int64_t>(k_block->get_shape()[K_SEQ_DIM]);
-                            NPUW_ASSERT(block_size % tile_size == 0 &&
-                                        "HFA block size must be a multiple of tile size");
-                            const int64_t tiles_in_block = block_size / tile_size;
-
-                            for (int64_t t = 0; t < tiles_in_block && past_kv_tiles > 0; ++t) {
-                                process_tile(regular_tile_request,
-                                             hfa_desc->_compiled_tile_model,
-                                             k_block,
-                                             v_block,
-                                             t * tile_size,
-                                             mask_tile_offset,
-                                             tile_size,
-                                             false,       // async
-                                             uses_mask);  // process_with_mask
-                                mask_tile_offset += tile_size;
-                                past_kv_tiles--;
+                        {
+                            OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::HFA::regular_tile");
+                            for (size_t block_idx = 0; block_idx < past_key_blocks.size() && past_kv_tiles > 0;
+                                 ++block_idx) {
+                                const auto& k_block = past_key_blocks[block_idx];
+                                const auto& v_block = past_value_blocks[block_idx];
+                                const int64_t block_size = static_cast<int64_t>(k_block->get_shape()[K_SEQ_DIM]);
+                                NPUW_ASSERT(block_size % tile_size == 0 &&
+                                            "HFA block size must be a multiple of tile size");
+                                const int64_t tiles_in_block = block_size / tile_size;
+                                for (int64_t t = 0; t < tiles_in_block && past_kv_tiles > 0; ++t) {
+                                    process_tile(regular_tile_request,
+                                                 hfa_desc->_compiled_tile_model,
+                                                 k_block,
+                                                 v_block,
+                                                 t * tile_size,
+                                                 mask_tile_offset,
+                                                 tile_size,
+                                                 false,       // async
+                                                 uses_mask);  // process_with_mask
+                                    mask_tile_offset += tile_size;
+                                    past_kv_tiles--;
+                                }
                             }
                         }
                         NPUW_ASSERT(past_kv_tiles == 0 &&
@@ -1130,12 +1133,13 @@ ov::npuw::v1::subgraphs::RuntimeBehaviorFactory make_runtime_factory() {
                             OV_ITT_SCOPED_TASK(itt::domains::NPUW, "attn::HFA::final_tile");
                             const size_t present_seq_length = present_key_tensor->get_shape()[K_SEQ_DIM];
                             const int64_t final_tile_length = static_cast<int64_t>(present_seq_length);
-                            OPENVINO_ASSERT(
-                                final_tile_length == tile_size,
-                                "Final tile must process entire present KV sequence in a single inference. "
-                                "This is guaranteed during compilation (tile_size = query_size = present_seq_length).");
+                            OPENVINO_ASSERT(final_tile_length == tile_size,
+                                            "Final tile must process entire present KV sequence in a single inference. "
+                                            "This is guaranteed during compilation (tile_size = query_size = "
+                                            "present_seq_length).");
                             const int64_t mask_total_length = attention_mask_tensor->get_shape()[MASK_KV_SEQ_DIM];
                             const int64_t final_mask_offset = mask_total_length - final_tile_length;
+
                             process_tile(final_tile_request,
                                          hfa_desc->_compiled_final_tile_model,
                                          present_key_tensor,

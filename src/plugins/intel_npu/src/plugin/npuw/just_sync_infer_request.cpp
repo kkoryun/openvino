@@ -481,6 +481,8 @@ void ov::npuw::JustInferRequest::initialize_subgraph_behaviors() {
         }
         m_subgraph_behaviors[idx] = std::make_unique<ov::npuw::v1::subgraphs::DirectBehavior>(
             [post_legacy_hook = *post_legacy_hook](ov::npuw::v1::subgraphs::InferContext& ctx) {
+                OV_ITT_SCOPED_TASK(itt::domains::NPUW,
+                                   "JustInferRequest::legacy_infer#" + std::to_string(ctx.subgraph_idx));
                 ctx.legacy_infer();
                 post_legacy_hook(ctx);
             });
@@ -886,7 +888,7 @@ void ov::npuw::JustInferRequest::initialize_moe_executor() {
 }
 
 void ov::npuw::JustInferRequest::run_subrequest_for_success(std::size_t idx) {
-    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "JustInferRequest::run_subrequest_for_success");
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "JustInferRequest::run_subrequest_for_success#" + std::to_string(idx));
     auto& comp_model_desc = m_npuw_model->m_compiled_submodels[idx];
     const auto real_idx = comp_model_desc.replaced_by.value_or(idx);
     bool next_prepared = false;
@@ -1049,6 +1051,7 @@ void ov::npuw::JustInferRequest::unsafe_infer_spatial(std::size_t real_idx, std:
 }
 
 void ov::npuw::JustInferRequest::legacy_infer(std::size_t real_idx, std::size_t idx) {
+    OV_ITT_SCOPED_TASK(itt::domains::NPUW, "JustInferRequest::legacy_infer#" + std::to_string(idx));
     auto& comp_model_desc = m_npuw_model->m_compiled_submodels[real_idx];
     auto& r = m_subrequests[real_idx];
     if (comp_model_desc.spatial) {
